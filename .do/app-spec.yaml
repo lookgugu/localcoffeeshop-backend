@@ -1,0 +1,96 @@
+# DigitalOcean App Platform Spec for localcoffeeshop-backend
+# This file defines the infrastructure and deployment configuration
+
+name: localcoffeeshop-backend
+region: nyc
+
+# Custom domains
+domains:
+  - domain: api.localcoffeeshop.co
+    type: PRIMARY
+    zone: localcoffeeshop.co
+
+# Note: App Platform has ephemeral storage
+# For database persistence with writes, use DigitalOcean Spaces
+# Current setup: Read-only database (baked into deployment)
+# To update data: Update database file in GitHub and redeploy
+
+# Backend service
+services:
+  - name: api
+    github:
+      repo: lookgugu/localcoffeeshop-backend
+      branch: main
+      deploy_on_push: true
+
+    source_dir: /
+
+    # Build configuration
+    build_command: npm install
+
+    run_command: npm start
+
+    # Service configuration
+    http_port: 3000
+    instance_count: 1
+    instance_size_slug: basic-xxs
+
+    # Health check
+    health_check:
+      http_path: /api/v1/health
+      initial_delay_seconds: 10
+      period_seconds: 10
+      timeout_seconds: 3
+      success_threshold: 1
+      failure_threshold: 3
+
+    # Environment variables
+    envs:
+      - key: NODE_ENV
+        value: production
+        scope: RUN_AND_BUILD_TIME
+
+      - key: PORT
+        value: "3000"
+        scope: RUN_AND_BUILD_TIME
+
+      - key: DB_PATH
+        value: ./data/coffee_shops.db
+        scope: RUN_AND_BUILD_TIME
+
+      - key: CORS_ORIGIN
+        value: https://localcoffeeshop.co
+        scope: RUN_AND_BUILD_TIME
+
+      - key: FRONTEND_URL
+        value: https://localcoffeeshop.co
+        scope: RUN_AND_BUILD_TIME
+
+      - key: RATE_LIMIT_WINDOW_MS
+        value: "900000"
+        scope: RUN_AND_BUILD_TIME
+
+      - key: RATE_LIMIT_MAX_REQUESTS
+        value: "100"
+        scope: RUN_AND_BUILD_TIME
+
+      - key: GA_MEASUREMENT_ID
+        value: G-YVSXN7PM48
+        scope: RUN_AND_BUILD_TIME
+        type: SECRET
+
+      - key: LOG_LEVEL
+        value: info
+        scope: RUN_AND_BUILD_TIME
+
+      - key: COMPRESSION_LEVEL
+        value: "6"
+        scope: RUN_AND_BUILD_TIME
+
+      - key: COMPRESSION_THRESHOLD
+        value: "1024"
+        scope: RUN_AND_BUILD_TIME
+
+# Features
+features:
+  - buildpack-stack=ubuntu-22

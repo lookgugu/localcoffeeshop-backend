@@ -1,0 +1,82 @@
+# Digital Ocean App Platform Configuration
+# This file defines how your application should be deployed on Digital Ocean
+
+name: local-coffee-shops
+
+# Services define the components of your application
+services:
+  - name: web
+    # GitHub repository information
+    # Replace with your actual repository details
+    github:
+      branch: main
+      deploy_on_push: true
+      repo: lookgugu/localcoffeeshop.co
+
+    # Build configuration
+    build_command: npm install
+
+    # Run command - starts the Express server
+    run_command: npm start
+
+    # Environment variables
+    envs:
+      - key: NODE_ENV
+        value: "production"
+      - key: PORT
+        value: "8080"
+      - key: LOG_LEVEL
+        value: "info"
+      - key: CORS_ORIGIN
+        value: "*"
+      - key: RATE_LIMIT_MAX_REQUESTS
+        value: "100"
+      - key: RATE_LIMIT_WINDOW_MS
+        value: "900000"
+      - key: COMPRESSION_LEVEL
+        value: "6"
+      - key: COMPRESSION_THRESHOLD
+        value: "1024"
+      # Add these as encrypted secrets in Digital Ocean dashboard
+      # - key: GA_MEASUREMENT_ID
+      #   scope: RUN_TIME
+      #   type: SECRET
+      # - key: METRICS_AUTH_TOKEN
+      #   scope: RUN_TIME
+      #   type: SECRET
+
+    # HTTP configuration
+    http_port: 8080
+
+    # Health check configuration
+    health_check:
+      http_path: /api/v1/health
+      initial_delay_seconds: 10
+      period_seconds: 10
+      timeout_seconds: 3
+      success_threshold: 1
+      failure_threshold: 3
+
+    # Instance configuration
+    instance_count: 1
+    instance_size_slug: basic-xxs
+
+    # Source directory (if your code is in a subdirectory)
+    source_dir: /
+
+    # Routes - serve the application at the root
+    routes:
+      - path: /
+
+# Static sites (if you want to serve static files separately)
+# For this app, we're serving everything through Express
+# static_sites: []
+
+# Databases (SQLite is file-based, included in deployment)
+# databases: []
+
+# Workers (background jobs)
+# workers: []
+
+# Jobs (one-time or scheduled tasks)
+# jobs: []

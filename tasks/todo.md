@@ -28,19 +28,19 @@ Smallest blast radius, biggest immediate clarity win. Sets up #4 (server.js spli
 
 Independent of the cache work. Pure deletion.
 
-- [ ] Delete `prepare()`, `serialize()`, `getInstance()` from `src/db.js` (lines 70–75, 146–156)
-- [ ] Update `module.exports` block — interface goes from 8 methods to 5
-- [ ] Delete test blocks in `tests/unit/db.test.js`:
-  - [ ] `describe('getInstance()')` (lines 117–135)
-  - [ ] `describe('prepare()')` (lines 313–357)
-  - [ ] `describe('serialize()')` (lines 358–403)
-- [ ] Cull tests that test sqlite3 itself (not our wrapper):
-  - [ ] Parameterised-query injection-safety tests in `describe('get()')` and `describe('all()')`
-  - [ ] Multi-row-return assertions that mirror sqlite3 behaviour
-  - [ ] LIMIT/OFFSET behaviour tests
-  - [ ] Keep: tests that assert our wrapping behaviour (metrics recorded, logger called, errors propagate, `isHealthy` semantics)
-- [ ] Refactor tests that used `db.getInstance()` for test-table setup — use `tests/helpers/testDb.js` (already opens its own sqlite3 connection)
-- [ ] Update JSDoc header in `src/db.js` — the "easier database swapping" claim is now truthful since `getInstance` no longer leaks
+- [x] Delete `prepare()`, `serialize()`, `getInstance()` from `src/db.js` (lines 70–75, 146–156)
+- [x] Update `module.exports` block — interface goes from 8 methods to 5
+- [x] Delete test blocks in `tests/unit/db.test.js`:
+  - [x] `describe('getInstance()')` (lines 117–135)
+  - [x] `describe('prepare()')` (lines 313–357)
+  - [x] `describe('serialize()')` (lines 358–403)
+- [x] Cull tests that test sqlite3 itself (not our wrapper):
+  - [x] Parameterised-query injection-safety tests in `describe('get()')` and `describe('all()')`
+  - [x] Multi-row-return assertions that mirror sqlite3 behaviour
+  - [x] LIMIT/OFFSET behaviour tests
+  - [x] Keep: tests that assert our wrapping behaviour (metrics recorded, logger called, errors propagate, `isHealthy` semantics)
+- [x] Refactor tests that used `db.getInstance()` for test-table setup — use `tests/helpers/testDb.js` (already opens its own sqlite3 connection)
+- [x] Update JSDoc header in `src/db.js` — the "easier database swapping" claim is now truthful since `getInstance` no longer leaks
 
 > **Note:** `db.run()` does NOT land here. It lands as part of #5 (idempotency), when there's a real production write that needs parameterisation.
 
@@ -136,3 +136,18 @@ Closes the safety loop on the write retries the frontend ApiClient (frontend #4)
 **Lessons learned:** (none worth adding to `tasks/lessons.md` — the work tracked the plan closely)
 
 **Open follow-ups:** none.
+
+### Candidate #6 (db.js shrink) — landed
+
+**What changed:**
+- `src/db.js`: 203 → 176 LOC. Deleted `getInstance()`, `prepare()`, `serialize()` and their `module.exports` entries. Interface narrowed from 8 methods to 5: `initialize`, `get`, `all`, `close`, `isHealthy`. Updated the header JSDoc to reflect the now-truthful "easier swap to PostgreSQL" claim and to explicitly note the removed escape hatch.
+- `tests/unit/db.test.js`: 635 → 288 LOC. Deleted the three `describe` blocks for the removed methods. Culled tests that asserted sqlite3 behaviour rather than our wrapper (SQL injection prevention via `?` binding, multi-row return shape, empty-array return, LIMIT/OFFSET passthrough, "missing table errors" duplicate). Refactored the surviving `get()`/`all()` tests to no longer need a populated table — they use `SELECT 1` and `SELECT 1 UNION ...` directly, since the goal is to assert our metrics/logger wiring, not sqlite3's data retrieval. No new escape hatch added.
+- Test count: 33 → 18 (15 deleted). All 18 surviving tests pass.
+
+**Test results:** Full suite 449/461 passing (up from 446/461 baseline). The 12 e2e failures are the pre-existing `tests/e2e/full-workflow.test.js` regressions noted under candidate #1 — unrelated to this change. `tests/unit/db.test.js` runs clean (18/18).
+
+**Deviations from plan:** Plan suggested using `tests/helpers/testDb.js` to populate a real table for the surviving `get()`/`all()` tests. In practice none of the surviving tests need real data — `SELECT 1` and `SELECT 1 UNION SELECT 2 UNION SELECT 3` exercise our wrapper code paths without any setup. Avoiding the helper kept the test file simpler.
+
+**Lessons learned:** none worth promoting to `tasks/lessons.md`.
+
+**Open follow-ups:** `db.run()` is still missing — lands with candidate #5 (idempotency) where there's a real production writer.

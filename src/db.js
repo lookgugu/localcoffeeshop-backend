@@ -1,9 +1,13 @@
 /**
  * Database Module
  *
- * Encapsulates database connection and query functions.
- * This abstraction allows for easier database swapping in the future
- * (e.g., SQLite -> PostgreSQL) by changing only this module.
+ * Encapsulates the database connection. The interface is intentionally narrow:
+ * initialize, get (single row), all (multi-row), close, isHealthy.
+ *
+ * This narrowness means an eventual swap to a different backend (PostgreSQL,
+ * etc.) would touch only this file. Earlier versions exposed a getInstance()
+ * escape hatch — that has been removed; tests use tests/helpers/testDb.js for
+ * setup that needs raw sqlite3 access.
  *
  * Current implementation: SQLite
  */
@@ -61,17 +65,6 @@ function initialize({ dbPath, logger: loggerInstance, metrics: metricsInstance }
             });
         });
     });
-}
-
-/**
- * Get the raw database instance
- * @returns {InstanceType<typeof sqlite3.Database>} The database instance
- */
-function getInstance() {
-    if (!db) {
-        throw new Error('Database not initialized. Call initialize() first.');
-    }
-    return db;
 }
 
 /**
@@ -139,23 +132,6 @@ function all(query, params, queryType = 'unknown') {
 }
 
 /**
- * Prepare a SQL statement for repeated execution
- * @param {string} query SQL query
- * @returns {InstanceType<typeof sqlite3.Statement>} Prepared statement
- */
-function prepare(query) {
-    return db.prepare(query);
-}
-
-/**
- * Execute operations in serial order
- * @param {Function} callback Operations to execute
- */
-function serialize(callback) {
-    db.serialize(callback);
-}
-
-/**
  * Close the database connection
  * @returns {Promise<void>}
  */
@@ -193,11 +169,8 @@ async function isHealthy() {
 
 module.exports = {
     initialize,
-    getInstance,
     get,
     all,
-    prepare,
-    serialize,
     close,
-    isHealthy
+    isHealthy,
 };

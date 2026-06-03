@@ -50,13 +50,13 @@ Independent of the cache work. Pure deletion.
 
 Coordinated with frontend repo. Each repo commits its own copy of `enums.js`; a GitHub Action on each repo verifies they match.
 
-- [ ] Create `src/enums.js`:
-  - [ ] `State` as a namespace of functions over a frozen private map (no field cluster): `stateName`, `stateCodeFromName`, `isStateCode`, `allStates`, `allStateCodes`
-  - [ ] `Price` as a typed enum with attached fields: `Price.MODERATE.label`, `Price.MODERATE.cssClass`, `Price.MODERATE.numeric`, `Price.fromKey()`, `Price.average()`, etc.
-- [ ] Replace `server.js` lines 959–974 — drop the hand-rolled `STATE_NAMES` + `stateNameToCode`; import `stateCodeFromName` from `src/enums.js`
-- [ ] Add GitHub Action `.github/workflows/enums-drift.yml`:
-  - [ ] On push, diff `src/enums.js` against the frontend repo's `public/enums.js` via raw URL
-  - [ ] Fail the build if they differ
+- [x] Create `src/enums.js`:
+  - [x] `State` as a namespace of functions over a frozen private map (no field cluster): `stateName`, `stateCodeFromName`, `isStateCode`, `allStates`, `allStateCodes`
+  - [x] `Price` as a typed enum with attached fields: `Price.MODERATE.label`, `Price.MODERATE.cssClass`, `Price.MODERATE.numeric`, `Price.fromKey()`, `Price.average()`, etc.
+- [x] Replace `server.js` lines 959–974 — drop the hand-rolled `STATE_NAMES` + `stateNameToCode`; import `stateCodeFromName` from `src/enums.js`
+- [x] Add GitHub Action `.github/workflows/enums-drift.yml`:
+  - [x] On push, diff `src/enums.js` against the frontend repo's `public/enums.js` via raw URL
+  - [x] Fail the build if they differ
 - [ ] (Coordinate with frontend repo to apply the matching half — see frontend `tasks/todo.md`)
 
 ---
@@ -151,3 +151,19 @@ Closes the safety loop on the write retries the frontend ApiClient (frontend #4)
 **Lessons learned:** none worth promoting to `tasks/lessons.md`.
 
 **Open follow-ups:** `db.run()` is still missing — lands with candidate #5 (idempotency) where there's a real production writer.
+
+### Candidate #2 backend half (enums consolidation) — landed
+
+**What changed:**
+- `src/enums.js` (167 LOC, new): UMD-style module that works as CommonJS in Node and as `window.CoffeeShopEnums` in the browser. Exports a `State` helper namespace (`stateName`, `stateCodeFromName`, `isStateCode`, `allStateCodes`, `allStates`) over a frozen private 52-entry map (50 states + DC + PR — extracted verbatim from the frontend repo's `public/constants.js`). Exports `Price` as a typed enum with frozen singleton instances (`INEXPENSIVE`/`MODERATE`/`EXPENSIVE`/`UNKNOWN`) carrying `{key, numeric, label, cssClass}` plus `all/fromKey/fromNumeric/average/averageFromNumeric` namespace methods. Reverse name→code index and sorted arrays pre-computed once at module init.
+- `src/server.js`: dropped the 17-LOC hand-rolled `STATE_NAMES` literal + the `stateNameToCode` derivation at lines 763–778, plus the now-stale comment header. Replaced with `const { stateCodeFromName } = require('./enums');` at the top of the file. The `/pages/states/:stateName.html` redirect handler now calls `stateCodeFromName(stateName)` directly (case-insensitive lookup matches old `toLowerCase()` semantics).
+- `.github/workflows/enums-drift.yml` (new): runs on push + pull_request, fetches the frontend repo's `public/enums.js` via `curl` against the GitHub raw URL, and `diff`s it against this repo's `src/enums.js`. Build fails with an `::error::` annotation if the two diverge. Expected to fail until the frontend repo's matching candidate lands.
+- `tests/unit/enums.test.js` (new, 47 tests): covers every State helper (known/unknown codes, case-insensitivity, whitespace trimming, non-string input, count/sort/frozen guarantees for `allStateCodes`/`allStates`), every Price method (singleton reference equality from `fromKey`/`fromNumeric`, UNKNOWN sentinel for bogus input, `average` ignoring UNKNOWN entries, empty-array handling, boundary behaviour of the `<1.5 / <2.5 / else` thresholds, ordering and freezing of `Price.all()`). Documents that `[MODERATE, EXPENSIVE]` averages to `EXPENSIVE` (avg 2.5 is not `<2.5` under the specified rule).
+
+**Test results:** 496/508 passing across the full suite (up from 449/461 baseline — the 47 new enums tests all pass; the 12 pre-existing `tests/e2e/full-workflow.test.js` failures noted in candidates #1 and #6 are unchanged and unrelated). `node -e "require('./src/enums').stateName('CA')"` returns `California`, confirming CommonJS import works. `grep STATE_NAMES src/server.js` returns nothing.
+
+**Deviations from plan:** Plan said "51 entries (50 states + DC + PR)" — the canonical frontend `constants.js` actually has 52 entries (counted via `Object.keys().length`). Used the real count and updated the test assertion accordingly. The "Coordinate with frontend repo" item is intentionally left unchecked since it's the hand-off to the other repo, not a backend action.
+
+**Lessons learned:** none worth promoting to `tasks/lessons.md`.
+
+**Open follow-ups:** Frontend repo must commit a byte-identical copy of `src/enums.js` to `public/enums.js` (per its own `tasks/todo.md` section 1) and update its `app.js`/`state.html` callers to import from `CoffeeShopEnums` instead of the inline `STATE_NAMES`/`PRICE_LEVELS` in `constants.js`. The `enums-drift` workflow will fail on every push until that lands — by design.

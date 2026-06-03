@@ -4,6 +4,7 @@ const express = require('express');
 const db = require('./db');
 const { QueryCache } = require('./lib/cache');
 const { makeCachedRoute } = require('./lib/cached-route');
+const { stateCodeFromName } = require('./enums');
 const path = require('path');
 const cors = require('cors');
 const helmet = require('helmet');
@@ -760,26 +761,9 @@ app.use('/api', (req, res, next) => {
 
 // Redirect old state page URLs to new dynamic page
 // Matches /pages/states/california.html and redirects to /html/state.html?code=CA
-const STATE_NAMES = {
-    'AK': 'Alaska', 'AL': 'Alabama', 'AR': 'Arkansas', 'AZ': 'Arizona',
-    'CA': 'California', 'CO': 'Colorado', 'CT': 'Connecticut', 'DC': 'Washington D.C.',
-    'DE': 'Delaware', 'FL': 'Florida', 'GA': 'Georgia', 'HI': 'Hawaii',
-    'IA': 'Iowa', 'ID': 'Idaho', 'IL': 'Illinois', 'IN': 'Indiana',
-    'KS': 'Kansas', 'KY': 'Kentucky', 'LA': 'Louisiana', 'MA': 'Massachusetts',
-    'MD': 'Maryland', 'ME': 'Maine', 'MI': 'Michigan', 'MN': 'Minnesota',
-    'MO': 'Missouri', 'MS': 'Mississippi', 'MT': 'Montana', 'NC': 'North Carolina',
-    'ND': 'North Dakota', 'NE': 'Nebraska', 'NH': 'New Hampshire', 'NJ': 'New Jersey',
-    'NM': 'New Mexico', 'NV': 'Nevada', 'NY': 'New York', 'OH': 'Ohio',
-    'OK': 'Oklahoma', 'OR': 'Oregon', 'PA': 'Pennsylvania', 'PR': 'Puerto Rico',
-    'RI': 'Rhode Island', 'SC': 'South Carolina', 'SD': 'South Dakota', 'TN': 'Tennessee',
-    'TX': 'Texas', 'UT': 'Utah', 'VA': 'Virginia', 'VT': 'Vermont',
-    'WA': 'Washington', 'WI': 'Wisconsin', 'WV': 'West Virginia', 'WY': 'Wyoming'
-};
-const stateNameToCode = Object.fromEntries(Object.entries(STATE_NAMES).map(([code, name]) => [name.toLowerCase(), code]));
-
 app.get('/pages/states/:stateName.html', (req, res) => {
     const stateName = req.params.stateName.replace('-', ' ');
-    const stateCode = stateNameToCode[stateName];
+    const stateCode = stateCodeFromName(stateName);
 
     if (stateCode) {
         res.redirect(301, `/html/state.html?code=${stateCode}`);

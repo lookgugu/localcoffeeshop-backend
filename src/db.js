@@ -2,7 +2,7 @@
  * Database Module
  *
  * Encapsulates the database connection. The interface is intentionally narrow:
- * initialize, get (single row), all (multi-row), close, isHealthy.
+ * initialize, get (single row), all (multi-row), run (write), close, isHealthy.
  *
  * This narrowness means an eventual swap to a different backend (PostgreSQL,
  * etc.) would touch only this file. Earlier versions exposed a getInstance()
@@ -132,6 +132,47 @@ function all(query, params, queryType = 'unknown') {
 }
 
 /**
+ * Execute a write statement (INSERT / UPDATE / DELETE) with metrics tracking.
+ *
+ * Mirrors `get` / `all` for instrumentation. Resolves with `{ lastID, changes }`
+ * — the two pieces of post-write state sqlite3 surfaces via its `function`
+ * callback's `this`. Use this for any DML that needs parameter binding.
+ *
+ * @param {string} query SQL statement
+ * @param {Array} params Statement parameters
+ * @param {string} queryType Type label for metrics
+ * @returns {Promise<{lastID: number, changes: number}>}
+ */
+function run(query, params, queryType = 'unknown') {
+    return new Promise((resolve, reject) => {
+        const startTime = Date.now();
+
+        // 'function' (not arrow) — sqlite3 uses `this.lastID` / `this.changes`.
+        db.run(query, params, function (err) {
+            const duration = (Date.now() - startTime) / 1000;
+
+            if (metrics) {
+                metrics.queryDuration.labels(queryType).observe(duration);
+                if (err) {
+                    metrics.errors.labels(queryType).inc();
+                }
+            }
+
+            if (err) {
+                logger.error({ err, queryType, duration }, 'Database query error');
+                reject(err);
+            } else {
+                logger.debug(
+                    { queryType, duration, lastID: this.lastID, changes: this.changes },
+                    'Database write completed',
+                );
+                resolve({ lastID: this.lastID, changes: this.changes });
+            }
+        });
+    });
+}
+
+/**
  * Close the database connection
  * @returns {Promise<void>}
  */
@@ -171,6 +212,7 @@ module.exports = {
     initialize,
     get,
     all,
+    run,
     close,
     isHealthy,
 };

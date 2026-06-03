@@ -172,6 +172,48 @@ describe('Database Module', () => {
     });
   });
 
+  describe('run() - Write Statement', () => {
+    beforeEach(async () => {
+      await db.initialize({
+        dbPath: ':memory:',
+        logger: mockLogger,
+        metrics: mockMetrics,
+      });
+      // Need a real table to exercise INSERT.
+      await db.run('CREATE TABLE t (id INTEGER PRIMARY KEY AUTOINCREMENT, v TEXT)', [], 'create_t');
+    });
+
+    it('resolves with { lastID, changes } and logs the write', async () => {
+      const result = await db.run('INSERT INTO t (v) VALUES (?)', ['hello'], 'insert_t');
+
+      expect(result.lastID).toBeGreaterThan(0);
+      expect(result.changes).toBe(1);
+      expect(mockMetrics.queryDuration.labels).toHaveBeenCalledWith('insert_t');
+      expect(mockLogger.debug).toHaveBeenCalledWith(
+        expect.objectContaining({
+          queryType: 'insert_t',
+          lastID: result.lastID,
+          changes: 1,
+        }),
+        'Database write completed',
+      );
+    });
+
+    it('rejects on invalid SQL and counts the error', async () => {
+      await expect(
+        db.run('INSERT INTO nonexistent (v) VALUES (?)', ['x'], 'bad_insert')
+      ).rejects.toThrow();
+
+      expect(mockLogger.error).toHaveBeenCalled();
+      expect(mockMetrics.errors.labels).toHaveBeenCalledWith('bad_insert');
+    });
+
+    it('uses default query type if not provided', async () => {
+      await db.run('INSERT INTO t (v) VALUES (?)', ['y']);
+      expect(mockMetrics.queryDuration.labels).toHaveBeenCalledWith('unknown');
+    });
+  });
+
   describe('close()', () => {
     it('should close database connection', async () => {
       await db.initialize({

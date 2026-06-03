@@ -91,7 +91,7 @@ The big refactor. Best to land #1 first so the cache is already a separate modul
 
 Closes the safety loop on the write retries the frontend ApiClient (frontend #4) sends. Also lands `db.run()` — the missing capability we deferred from candidate #6.
 
-- [ ] Create migration: `migrations/NNN_create_idempotency_keys.sql`
+- [x] Create migration: `migrations/004_create_idempotency_keys.sql`
   ```sql
   CREATE TABLE idempotency_keys (
     key TEXT PRIMARY KEY,
@@ -102,17 +102,17 @@ Closes the safety loop on the write retries the frontend ApiClient (frontend #4)
   );
   CREATE INDEX idx_idempotency_created_at ON idempotency_keys(created_at);
   ```
-- [ ] Add `run(sql, params, queryType)` to `src/db.js` (same metrics + logging pattern as `get` and `all`)
-- [ ] Create `src/lib/idempotency.js` — `withIdempotency({ db, ttlSeconds = 86400 })` middleware
-  - [ ] On request: `SELECT` from `idempotency_keys` WHERE key matches AND `created_at > now-ttl`
-  - [ ] On hit: replay cached `{status, response}` with `Idempotent-Replay: true` header; skip handler
-  - [ ] On miss: intercept `res.json` to `INSERT OR IGNORE` the response after the handler runs
-  - [ ] No `Idempotency-Key` header → call `next()` immediately (no dedup)
-- [ ] Create `src/routes/coffee-shops.js` — `mountCoffeeShops(router, { db })` mounting `POST /coffee-shops` and `PUT /coffee-shops/:id` with `withIdempotency` middleware
-- [ ] Decide cleanup strategy:
-  - [ ] Option A: lazy sweep on insert (delete-where-created_at-old runs probabilistically)
-  - [ ] Option B: small cron script (`scripts/idempotency-cleanup.js`) run daily
-- [ ] Tests: hit, miss, concurrent retry (both insert at same time → `INSERT OR IGNORE` wins gracefully), TTL expiry, no-header passthrough
+- [x] Add `run(sql, params, queryType)` to `src/db.js` (same metrics + logging pattern as `get` and `all`)
+- [x] Create `src/lib/idempotency.js` — `withIdempotency({ db, ttlSeconds = 86400 })` middleware
+  - [x] On request: `SELECT` from `idempotency_keys` WHERE key matches AND `created_at > now-ttl`
+  - [x] On hit: replay cached `{status, response}` with `Idempotent-Replay: true` header; skip handler
+  - [x] On miss: intercept `res.json` to `INSERT OR IGNORE` the response after the handler runs
+  - [x] No `Idempotency-Key` header → call `next()` immediately (no dedup)
+- [x] Create `src/routes/coffee-shops.js` — `mountCoffeeShops(router, { db })` mounting `POST /coffee-shops` and `PUT /coffee-shops/:id` with `withIdempotency` middleware
+- [x] Decide cleanup strategy:
+  - [x] Option A: lazy sweep on insert (delete-where-created_at-old runs probabilistically) — **chosen**
+  - [ ] Option B: small cron script (`scripts/idempotency-cleanup.js`) run daily — not chosen
+- [x] Tests: hit, miss, concurrent retry (both insert at same time → `INSERT OR IGNORE` wins gracefully), TTL expiry, no-header passthrough
 
 ---
 
@@ -202,3 +202,30 @@ Closes the safety loop on the write retries the frontend ApiClient (frontend #4)
 **Open follow-ups:**
 - The whitespace-only search term (`q=+++`) generates `""* ""*` as the FTS expression, which SQLite tolerates but is technically nonsense. Filtering empty tokens would be cleaner, but the existing integration test expects 200 on whitespace-only input, so the current behaviour is preserved. If we ever tighten input validation to reject whitespace-only terms, this can be cleaned up.
 - The 404 file (`public/html/404.html`) doesn't exist in this checkout, so non-API 404s currently return 500 via the global error handler. Pre-existing condition — matches the original `server.js` behaviour exactly. Not in scope for this refactor.
+
+### Candidate #7 (backend idempotency) — landed
+
+**What changed:**
+- `migrations/004_create_idempotency_keys.sql` (new): the `idempotency_keys` table — `key` PK, `endpoint`, `status_code`, `response`, `created_at` (unix seconds) — plus the `idx_idempotency_created_at` index used by both the lookup-filter-by-TTL query and the lazy sweep. Up/down sections wired for the existing `scripts/migrate.js` parser.
+- `src/db.js`: added `run(query, params, queryType)` (~30 LOC) following the same metrics/logging pattern as `get`/`all`. Resolves with `{lastID, changes}` from sqlite3's `function`-callback `this`. Interface goes from 5 methods to 6 (initialize/get/all/run/close/isHealthy); the JSDoc header was updated to match. This is the missing capability deferred from candidate #6, now justified by a real production write.
+- `src/lib/idempotency.js` (92 LOC, new): `withIdempotency({db, ttlSeconds=86400, logger})` middleware. No header → `next()` immediately. Hit (TTL-bounded SELECT returns a row) → `res.status(...).type('json').send(stored_payload)` with `Idempotent-Replay: true`. Miss → wrap `res.json` so a fire-and-forget `INSERT OR IGNORE` runs after the handler. Lookup failure → log and `next()` (lookup-doesn't-block-writes invariant). `_maybeSweep` fires on ~1% of inserts and deletes rows older than `now - ttl`.
+- `src/routes/coffee-shops.js` (117 LOC, new): `mountCoffeeShops(router, {db, logger})` exposing `POST /coffee-shops` and `PUT /coffee-shops/:id`, both wrapped in the middleware. Body shape mirrors the frontend `submit.js` payload (`{shop: {displayName: {text}, formattedAddress, state, priceLevel}}`). `extractShop()` validates required fields, throwing `ValidationError` which the global error handler maps to 400. Wired into `src/routes/api-v1.js` alongside the existing mounters.
+- `tests/helpers/testDb.js`: added the `idempotency_keys` table + index to the in-memory schema so write-path integration tests work without running the real migrations.
+- `tests/helpers/testServer.js`: extended the monkey-patch to route `db.run` through the test sqlite3 instance (matching the existing `db.get`/`db.all` pattern) and surface `{lastID, changes}` from `this` correctly.
+- `tests/unit/lib/idempotency.test.js` (188 LOC, new — 6 tests): hit (handler not called, replay header set), miss (handler runs, INSERT params correct), no-header (handler runs, db untouched), TTL boundary (verifies the `minCreated` SELECT parameter is `now - ttlSeconds`), concurrent (two parallel requests both resolve and both INSERTs fire — the second is a sqlite no-op in real life), lookup-failure (SELECT rejects → handler still runs, no INSERT).
+- `tests/integration/idempotency.test.js` (119 LOC, new — 3 tests): same key twice → second has `Idempotent-Replay: true`, body matches first, only one `coffee_shops` row created; different keys → two `coffee_shops` rows created; no header → row inserted normally, `idempotency_keys` count unchanged.
+- `tests/unit/db.test.js`: added a `run()` describe block with 3 tests (lastID/changes/log shape, error rejection, default queryType).
+
+**Decided cleanup strategy:** Option A — lazy probabilistic sweep on insert. 1% of inserts also fire a `DELETE FROM idempotency_keys WHERE created_at < ?`. No cron, no infrastructure; eventually consistent and proportional to write load.
+
+**Test results:** **524/536 passing** (was 512/524 baseline). +12 new tests across 2 new suites + 3 added to `db.test.js`; zero regressions. The same 12 pre-existing `tests/e2e/full-workflow.test.js` failures (asserting on header names and fields the codebase has never produced) remain unrelated to this work.
+
+**Manual verification:** Applied migration SQL to a copy of `data/coffee_shops.db` via `sqlite3 < migrations/004_create_idempotency_keys.sql` (sqlite3 CLI runs both up+down inline; the `migrate.js` parser splits on `-- migration:up`/`down`). Verified the schema with `.schema idempotency_keys`. Started the server on port 3457 against a freshly migrated DB. Two `POST /api/v1/coffee-shops` requests with the same `Idempotency-Key: smoke-test-1` returned identical bodies (id 38649 both times); second response carried `Idempotent-Replay: true`. `SELECT COUNT(*) FROM coffee_shops WHERE name = 'Smoke Test Cafe'` returned 1; `SELECT * FROM idempotency_keys` showed the one row keyed `smoke-test-1`.
+
+**Deviations from plan:** None. The `scripts/migrate.js` has a pre-existing bug (`MIGRATIONS_DIR = path.join(__dirname, 'migrations')` resolves to `scripts/migrations`, not the repo's `migrations/`) — flagged but not fixed; out of scope.
+
+**Lessons learned:** none worth promoting to `tasks/lessons.md`.
+
+**Open follow-ups:**
+- `scripts/migrate.js` looks for migrations in `scripts/migrations` rather than `./migrations` — pre-existing. The repo's migration files have presumably been applied to the production DB out-of-band. A one-line fix (`path.join(__dirname, '..', 'migrations')`) would land the convenience the script promises.
+- The middleware caches by key alone — it does NOT verify that the request body matches the original. The Idempotency-Key spec recommends a body-hash check to reject mismatched payloads under the same key. Not implemented because the frontend ApiClient (frontend #4) generates one key per logical request and never reuses across distinct payloads.

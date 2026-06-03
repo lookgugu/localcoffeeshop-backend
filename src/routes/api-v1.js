@@ -12,6 +12,7 @@ const { attachCacheHeaders } = require('../lib/responses');
 const { mountStates } = require('./states');
 const { mountSearch } = require('./search');
 const { mountOps } = require('./ops');
+const { mountCoffeeShops } = require('./coffee-shops');
 
 function mountApiV1(app, deps) {
     const router = express.Router();
@@ -20,6 +21,7 @@ function mountApiV1(app, deps) {
     mountStates(router, deps);
     mountSearch(router, deps);
     mountOps(router, deps);
+    mountCoffeeShops(router, deps);
 
     app.use('/api/v1', router);
 

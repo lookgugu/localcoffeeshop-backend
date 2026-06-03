@@ -43,13 +43,20 @@ async function startTestServer(testDb = null) {
     };
     await db.initialize({ dbPath: ':memory:', logger, metrics: mockMetrics });
 
-    // Route db.get / db.all through the test database instance so suites
+    // Route db.get / db.all / db.run through the test database instance so suites
     // get their seeded fixtures rather than the empty in-memory db.
     db.get = (query, params) => new Promise((resolve, reject) => {
       testDb.get(query, params, (err, row) => (err ? reject(err) : resolve(row)));
     });
     db.all = (query, params) => new Promise((resolve, reject) => {
       testDb.all(query, params, (err, rows) => (err ? reject(err) : resolve(rows)));
+    });
+    db.run = (query, params) => new Promise((resolve, reject) => {
+      // 'function' (not arrow) — sqlite3 surfaces lastID/changes on `this`.
+      testDb.run(query, params, function (err) {
+        if (err) return reject(err);
+        resolve({ lastID: this.lastID, changes: this.changes });
+      });
     });
   }
 

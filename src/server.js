@@ -2,6 +2,8 @@ require('dotenv').config();
 
 const express = require('express');
 const db = require('./db');
+const { QueryCache } = require('./lib/cache');
+const { makeCachedRoute } = require('./lib/cached-route');
 const path = require('path');
 const cors = require('cors');
 const helmet = require('helmet');
@@ -76,143 +78,8 @@ register.registerMetric(databaseErrors);
 register.registerMetric(cacheHits);
 register.registerMetric(cacheMisses);
 
-// In-memory cache implementation with TTL support, max size limit, and LRU eviction
-class SimpleCache {
-    constructor(options = {}) {
-        const {
-            defaultTTL = 3600000,    // Default 1 hour TTL
-            maxSize = 10000,          // Maximum number of entries
-            cleanupInterval = 60000   // Cleanup every minute
-        } = options;
-
-        this.cache = new Map();
-        this.defaultTTL = defaultTTL;
-        this.maxSize = maxSize;
-
-        // Single periodic cleanup timer instead of per-entry timers
-        this.cleanupTimer = setInterval(() => {
-            this._cleanup();
-        }, cleanupInterval);
-
-        // Prevent timer from keeping process alive
-        if (this.cleanupTimer.unref) {
-            this.cleanupTimer.unref();
-        }
-    }
-
-    set(key, value, ttl = this.defaultTTL) {
-        // Evict oldest entries if at max size
-        if (this.cache.size >= this.maxSize && !this.cache.has(key)) {
-            this._evictOldest();
-        }
-
-        const now = Date.now();
-        this.cache.set(key, {
-            value,
-            expiresAt: now + ttl,
-            lastAccessed: now
-        });
-    }
-
-    get(key) {
-        const entry = this.cache.get(key);
-
-        if (!entry) {
-            cacheMisses.labels(key).inc();
-            return null;
-        }
-
-        // Check if expired
-        if (Date.now() > entry.expiresAt) {
-            this.cache.delete(key);
-            cacheMisses.labels(key).inc();
-            return null;
-        }
-
-        // Update last accessed time for LRU tracking
-        entry.lastAccessed = Date.now();
-        cacheHits.labels(key).inc();
-        return entry.value;
-    }
-
-    delete(key) {
-        return this.cache.delete(key);
-    }
-
-    clear() {
-        this.cache.clear();
-    }
-
-    has(key) {
-        const entry = this.cache.get(key);
-        if (!entry) return false;
-
-        // Check if expired
-        if (Date.now() > entry.expiresAt) {
-            this.cache.delete(key);
-            return false;
-        }
-
-        return true;
-    }
-
-    size() {
-        return this.cache.size;
-    }
-
-    // Internal cleanup method - removes expired entries
-    _cleanup() {
-        const now = Date.now();
-        let cleaned = 0;
-        // Iterate directly without creating array copy
-        for (const [key, entry] of this.cache.entries()) {
-            if (now > entry.expiresAt) {
-                this.cache.delete(key);
-                cleaned++;
-            }
-        }
-        if (cleaned > 0) {
-            // Use logger if available, otherwise silent
-            if (typeof logger !== 'undefined') {
-                logger.debug({ cleaned, remaining: this.cache.size }, 'Cache cleanup completed');
-            }
-        }
-    }
-
-    // Evict oldest (least recently accessed) entries when at max size
-    _evictOldest() {
-        // Find and remove the least recently accessed entry
-        let oldestKey = null;
-        let oldestTime = Infinity;
-
-        // Iterate directly without creating array copy
-        for (const [key, entry] of this.cache.entries()) {
-            if (entry.lastAccessed < oldestTime) {
-                oldestTime = entry.lastAccessed;
-                oldestKey = key;
-            }
-        }
-
-        if (oldestKey) {
-            this.cache.delete(oldestKey);
-        }
-    }
-
-    // Stop cleanup timer (for graceful shutdown)
-    destroy() {
-        if (this.cleanupTimer) {
-            clearInterval(this.cleanupTimer);
-            this.cleanupTimer = null;
-        }
-    }
-}
-
-// Initialize cache instance with sensible limits
-const queryCache = new SimpleCache({
-    defaultTTL: 3600000,    // 1 hour default TTL
-    maxSize: 10000,         // Max 10,000 entries
-    cleanupInterval: 60000  // Cleanup every minute
-});
+// Initialize cache instance — extracted into src/lib/cache.js
+const queryCache = new QueryCache({ maxEntries: 10000 });
 
 
 
@@ -569,23 +436,15 @@ function sendSuccess(res, data, metadata = null) {
     res.json(response);
 }
 
+// Cached-route wrapper bound to this server's cache + metrics + response helper
+const cached = makeCachedRoute(queryCache, { cacheHits, cacheMisses, sendSuccess });
+
 // API Routes - Version 1
 
 // Get all states with coffee shop counts
 // Uses indexed 'state' column and prepared statement for optimal performance
 // Implements in-memory caching to reduce database load
-apiV1Router.get('/states', asyncHandler(async (req, res) => {
-    const cacheKey = 'states-list';
-
-    // Check cache first
-    const cachedData = queryCache.get(cacheKey);
-    if (cachedData) {
-        logger.debug({ source: 'cache' }, 'States retrieved from cache');
-        res.set('Cache-Control', 'public, max-age=86400');
-        res.set('X-Cache', 'HIT');
-        return sendSuccess(res, cachedData.rows, cachedData.metadata);
-    }
-
+apiV1Router.get('/states', cached(async () => {
     const query = `
         SELECT
             state as state_code,
@@ -603,53 +462,17 @@ apiV1Router.get('/states', asyncHandler(async (req, res) => {
     `;
 
     const rows = await db.all(query, [], 'get_all_states');
-
-    logger.debug({ count: rows.length, source: 'database' }, 'States retrieved from database');
-
-    // Cache result for 24 hours (86400000 ms) - state statistics change infrequently
     const metadata = { count: rows.length, cached_at: new Date().toISOString() };
-    queryCache.set(cacheKey, { rows, metadata }, 86400000);
-
-    // Cache for 24 hours - state data doesn't change frequently
-    res.set('Cache-Control', 'public, max-age=86400');
-    res.set('X-Cache', 'MISS');
-    sendSuccess(res, rows, metadata);
-}));
+    return { data: rows, metadata };
+}, { ttlSeconds: 86400, cacheControlMaxAge: 86400 }));
 
 // Get coffee shops by state
 // Implements in-memory caching per state and pagination
-apiV1Router.get('/states/:stateCode', asyncHandler(async (req, res) => {
+const fetchStateShops = cached(async (req) => {
     const stateCode = req.params.stateCode.toUpperCase();
-
-    // Pagination parameters
     const page = parseInt(String(req.query.page || 1)) || 1;
-    const limit = Math.min(parseInt(String(req.query.limit || 100)) || 100, 500); // Max 500 per page
+    const limit = Math.min(parseInt(String(req.query.limit || 100)) || 100, 500);
     const offset = (page - 1) * limit;
-
-    // Validate state code format (2 uppercase letters)
-    if (!/^[A-Z]{2}$/.test(stateCode)) {
-        return sendError(res, 400, 'Invalid state code format. Expected 2-letter state abbreviation.');
-    }
-
-    // Validate pagination parameters
-    if (page < 1) {
-        return sendError(res, 400, 'Page number must be >= 1');
-    }
-    if (limit < 1) {
-        return sendError(res, 400, 'Limit must be >= 1');
-    }
-
-    // Generate cache key including pagination params
-    const cacheKey = `state-${stateCode}-page-${page}-limit-${limit}`;
-
-    // Check cache first
-    const cachedData = queryCache.get(cacheKey);
-    if (cachedData) {
-        logger.debug({ stateCode, page, limit, source: 'cache' }, 'State shops retrieved from cache');
-        res.set('Cache-Control', 'public, max-age=3600');
-        res.set('X-Cache', 'HIT');
-        return sendSuccess(res, cachedData.shops, cachedData.metadata);
-    }
 
     const countRow = await db.get('SELECT COUNT(*) as total FROM coffee_shops WHERE state = ?', [stateCode], 'count_state_shops');
     const total = countRow.total;
@@ -668,7 +491,6 @@ apiV1Router.get('/states/:stateCode', asyncHandler(async (req, res) => {
         LIMIT ? OFFSET ?
     `, [stateCode, limit, offset], 'get_state_shops');
 
-    // Transform data to match expected format
     const shops = rows.map(row => ({
         id: row.id,
         displayName: {
@@ -679,8 +501,6 @@ apiV1Router.get('/states/:stateCode', asyncHandler(async (req, res) => {
         priceLevel: row.price_level,
         state: stateCode
     }));
-
-    logger.debug({ stateCode, page, limit, count: shops.length, source: 'database' }, 'State shops retrieved from database');
 
     const metadata = {
         pagination: {
@@ -694,81 +514,43 @@ apiV1Router.get('/states/:stateCode', asyncHandler(async (req, res) => {
         state: stateCode
     };
 
-    // Cache result for 1 hour (3600000 ms)
-    queryCache.set(cacheKey, { shops, metadata }, 3600000);
+    return { data: shops, metadata };
+}, { ttlSeconds: 3600, cacheControlMaxAge: 3600 });
 
-    // Cache for 1 hour - shop data doesn't change frequently
-    res.set('Cache-Control', 'public, max-age=3600');
-    res.set('X-Cache', 'MISS');
-    sendSuccess(res, shops, metadata);
-}));
+apiV1Router.get('/states/:stateCode', (req, res, next) => {
+    const stateCode = req.params.stateCode.toUpperCase();
+    const page = parseInt(String(req.query.page || 1)) || 1;
+    const limit = parseInt(String(req.query.limit || 100)) || 100;
+
+    if (!/^[A-Z]{2}$/.test(stateCode)) {
+        return sendError(res, 400, 'Invalid state code format. Expected 2-letter state abbreviation.');
+    }
+    if (page < 1) {
+        return sendError(res, 400, 'Page number must be >= 1');
+    }
+    if (limit < 1) {
+        return sendError(res, 400, 'Limit must be >= 1');
+    }
+
+    return fetchStateShops(req, res, next);
+});
 
 // Search coffee shops with caching
-apiV1Router.get('/search', asyncHandler(async (req, res) => {
+const fetchSearchResults = cached(async (req) => {
     const searchTerm = typeof req.query.q === 'string' ? req.query.q : '';
     const state = typeof req.query.state === 'string' ? req.query.state : '';
     const price = typeof req.query.price === 'string' ? req.query.price : '';
-
-    // Pagination parameters with validation
     const page = Math.max(1, parseInt(String(req.query.page || 1), 10) || 1);
-    const limit = Math.min(Math.max(1, parseInt(String(req.query.limit || 100), 10) || 100), 500); // 1-500 per page
+    const limit = Math.min(Math.max(1, parseInt(String(req.query.limit || 100), 10) || 100), 500);
     const offset = (page - 1) * limit;
 
-    // Maximum page limit to prevent excessive database queries
-    const MAX_PAGE = 1000;
-    if (page > MAX_PAGE) {
-        return sendError(res, 400, `Page number too high. Maximum page is ${MAX_PAGE}.`);
-    }
-
-    // Input validation
-    const validPriceLevels = ['PRICE_LEVEL_INEXPENSIVE', 'PRICE_LEVEL_MODERATE', 'PRICE_LEVEL_EXPENSIVE'];
-
-    // Validate state code format if provided
-    if (state && !/^[A-Z]{2}$/.test(state.toUpperCase())) {
-        return sendError(res, 400, 'Invalid state code format. Expected 2-letter state abbreviation.');
-    }
-
-    // Validate price level if provided
-    if (price && !validPriceLevels.includes(price)) {
-        return sendError(res, 400, 'Invalid price level. Must be one of: PRICE_LEVEL_INEXPENSIVE, PRICE_LEVEL_MODERATE, PRICE_LEVEL_EXPENSIVE');
-    }
-
-    // Validate search term length to prevent performance issues
-    if (searchTerm && searchTerm.length > 100) {
-        return sendError(res, 400, 'Search term too long. Maximum 100 characters.');
-    }
-
-    // Validate search term characters (alphanumeric, spaces, and common punctuation only)
-    // Prevents special characters that could be used for abuse
-    if (searchTerm && !/^[a-zA-Z0-9\s\-'.,&]+$/.test(searchTerm)) {
-        return sendError(res, 400, 'Search term contains invalid characters. Only letters, numbers, spaces, and common punctuation allowed.');
-    }
-
-    // Generate cache key from search parameters
-    const normalizedTerm = (searchTerm || '').toLowerCase().trim();
-    const normalizedState = (state || '').toUpperCase();
-    const normalizedPrice = price || '';
-    const cacheKey = `search:${normalizedTerm}:${normalizedState}:${normalizedPrice}:${page}:${limit}`;
-
-    // Check cache first (5 minute TTL for search results)
-    const cachedResult = queryCache.get(cacheKey);
-    if (cachedResult) {
-        logger.debug({ cacheKey, source: 'cache' }, 'Search results retrieved from cache');
-        res.set('Cache-Control', 'public, max-age=300');
-        res.set('X-Cache', 'HIT');
-        return sendSuccess(res, cachedResult.shops, cachedResult.metadata);
-    }
-
-    // Build WHERE clause - use FTS5 for text search when available
     let whereClause = 'WHERE 1=1';
     let fromClause = 'coffee_shops';
     const params = [];
 
     if (searchTerm) {
-        // Use FTS5 for faster full-text search
         fromClause = `coffee_shops INNER JOIN coffee_shops_fts ON coffee_shops.id = coffee_shops_fts.rowid`;
         whereClause += ` AND coffee_shops_fts MATCH ?`;
-        // FTS5 search syntax: escape special chars and add * for prefix matching
         const ftsSearchTerm = searchTerm.replace(/['"]/g, '').split(/\s+/).map(t => `"${t}"*`).join(' ');
         params.push(ftsSearchTerm);
     }
@@ -783,14 +565,11 @@ apiV1Router.get('/search', asyncHandler(async (req, res) => {
         params.push(price);
     }
 
-    // First, get total count
     const countQuery = `SELECT COUNT(*) as total FROM ${fromClause} ${whereClause}`;
     const countRow = await db.get(countQuery, params, 'count_search_results');
-
     const total = countRow.total;
     const totalPages = Math.ceil(total / limit);
 
-    // Then get paginated results
     const query = `
         SELECT
             coffee_shops.id,
@@ -807,7 +586,6 @@ apiV1Router.get('/search', asyncHandler(async (req, res) => {
 
     const rows = await db.all(query, [...params, limit, offset], 'search_shops');
 
-    // Transform data to match expected format
     const shops = rows.map(row => ({
         id: row.id,
         displayName: {
@@ -831,14 +609,40 @@ apiV1Router.get('/search', asyncHandler(async (req, res) => {
         filters: { searchTerm, state, price }
     };
 
-    // Cache results for 5 minutes (300000 ms)
-    queryCache.set(cacheKey, { shops, metadata }, 300000);
-    logger.debug({ cacheKey, resultCount: shops.length, source: 'database' }, 'Search results cached');
+    return { data: shops, metadata };
+}, { ttlSeconds: 300, cacheControlMaxAge: 300 });
 
-    res.set('Cache-Control', 'public, max-age=300');
-    res.set('X-Cache', 'MISS');
-    sendSuccess(res, shops, metadata);
-}));
+apiV1Router.get('/search', (req, res, next) => {
+    const searchTerm = typeof req.query.q === 'string' ? req.query.q : '';
+    const state = typeof req.query.state === 'string' ? req.query.state : '';
+    const price = typeof req.query.price === 'string' ? req.query.price : '';
+    const page = Math.max(1, parseInt(String(req.query.page || 1), 10) || 1);
+
+    const MAX_PAGE = 1000;
+    if (page > MAX_PAGE) {
+        return sendError(res, 400, `Page number too high. Maximum page is ${MAX_PAGE}.`);
+    }
+
+    const validPriceLevels = ['PRICE_LEVEL_INEXPENSIVE', 'PRICE_LEVEL_MODERATE', 'PRICE_LEVEL_EXPENSIVE'];
+
+    if (state && !/^[A-Z]{2}$/.test(state.toUpperCase())) {
+        return sendError(res, 400, 'Invalid state code format. Expected 2-letter state abbreviation.');
+    }
+
+    if (price && !validPriceLevels.includes(price)) {
+        return sendError(res, 400, 'Invalid price level. Must be one of: PRICE_LEVEL_INEXPENSIVE, PRICE_LEVEL_MODERATE, PRICE_LEVEL_EXPENSIVE');
+    }
+
+    if (searchTerm && searchTerm.length > 100) {
+        return sendError(res, 400, 'Search term too long. Maximum 100 characters.');
+    }
+
+    if (searchTerm && !/^[a-zA-Z0-9\s\-'.,&]+$/.test(searchTerm)) {
+        return sendError(res, 400, 'Search term contains invalid characters. Only letters, numbers, spaces, and common punctuation allowed.');
+    }
+
+    return fetchSearchResults(req, res, next);
+});
 
 // Get coffee shop statistics
 // Get overall database statistics
@@ -1115,9 +919,6 @@ module.exports = { app, db };
 // Graceful shutdown handler
 async function gracefulShutdown(signal) {
     logger.info({ signal }, 'Received shutdown signal, closing server gracefully...');
-
-    // Destroy cache and stop cleanup timer
-    queryCache.destroy();
 
     // Close database connection
     await db.close();

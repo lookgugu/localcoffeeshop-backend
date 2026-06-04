@@ -3,12 +3,14 @@
  *
  * Exercises the middleware against a fake `db` so the tests run with no
  * sqlite3 dependency. Behaviour we cover:
- *   - hit: returns cached payload with Idempotent-Replay; handler not called
- *   - miss: handler called, response cached after res.json
- *   - no header: handler called, nothing cached
- *   - TTL expiry: row older than ttl → treated as miss
- *   - concurrent: parallel identical requests both succeed
- *   - lookup failure: SELECT throws → falls through to handler
+ *   - hit (completed): returns cached payload with Idempotent-Replay; handler not called
+ *   - hit (pending):   returns 409 IDEMPOTENCY_IN_PROGRESS; handler not called
+ *   - miss:            reserves a pending row, calls handler, flips to completed on 2xx
+ *   - 5xx response:    pending row released, NOT cached as completed
+ *   - no header:       handler called, nothing cached
+ *   - TTL expiry:      row older than ttl → treated as miss
+ *   - race (reservation lost): second caller sees changes === 0 → 409
+ *   - lookup failure:  SELECT throws → falls through to handler
  */
 
 const { withIdempotency } = require('../../../src/lib/idempotency');
@@ -19,12 +21,20 @@ function makeRes() {
         headers: {},
         body: null,
         rawBody: null,
+        _finishListeners: [],
+        _closeListeners: [],
         set(name, value) { this.headers[name.toLowerCase()] = value; return this; },
         get(name) { return this.headers[name.toLowerCase()]; },
         status(code) { this.statusCode = code; return this; },
         type() { return this; },
         send(payload) { this.rawBody = payload; return this; },
         json(payload) { this.body = payload; return this; },
+        on(event, listener) {
+            if (event === 'finish') this._finishListeners.push(listener);
+            if (event === 'close') this._closeListeners.push(listener);
+            return this;
+        },
+        _fireFinish() { this._finishListeners.forEach((fn) => fn()); },
     };
     return res;
 }
@@ -66,10 +76,10 @@ describe('withIdempotency middleware', () => {
         expect(db.run).not.toHaveBeenCalled();
     });
 
-    it('on hit: replays cached body, sets Idempotent-Replay, skips handler', async () => {
+    it('on completed hit: replays cached body, sets Idempotent-Replay, skips handler', async () => {
         const cachedBody = JSON.stringify({ success: true, data: { id: 7 } });
         const db = {
-            get: jest.fn().mockResolvedValue({ status_code: 201, response: cachedBody }),
+            get: jest.fn().mockResolvedValue({ status_code: 201, response: cachedBody, status: 'completed' }),
             run: jest.fn(),
         };
         const middleware = withIdempotency({ db, logger: silentLogger });
@@ -86,7 +96,26 @@ describe('withIdempotency middleware', () => {
         expect(db.run).not.toHaveBeenCalled();
     });
 
-    it('on miss: calls handler, then caches the response after res.json', async () => {
+    it('on pending hit: returns 409 IDEMPOTENCY_IN_PROGRESS, skips handler', async () => {
+        const db = {
+            get: jest.fn().mockResolvedValue({ status_code: 0, response: '', status: 'pending' }),
+            run: jest.fn(),
+        };
+        const middleware = withIdempotency({ db, logger: silentLogger });
+        const req = makeReq({ 'Idempotency-Key': 'k-pending' });
+        const res = makeRes();
+        const next = jest.fn();
+
+        await middleware(req, res, next);
+
+        expect(next).not.toHaveBeenCalled();
+        expect(res.statusCode).toBe(409);
+        expect(res.body.success).toBe(false);
+        expect(res.body.error.code).toBe('IDEMPOTENCY_IN_PROGRESS');
+        expect(db.run).not.toHaveBeenCalled();
+    });
+
+    it('on miss: reserves a pending row, calls handler, flips to completed on 2xx', async () => {
         const db = {
             get: jest.fn().mockResolvedValue(undefined),
             run: jest.fn().mockResolvedValue({ lastID: 1, changes: 1 }),
@@ -99,26 +128,73 @@ describe('withIdempotency middleware', () => {
         await middleware(req, res, next);
         expect(next).toHaveBeenCalledTimes(1);
 
-        // Simulate the handler running.
+        // Reservation insert ran BEFORE next().
+        const reserveCall = db.run.mock.calls.find(([sql]) => sql.includes('INSERT OR IGNORE INTO idempotency_keys'));
+        expect(reserveCall).toBeDefined();
+        const [, reserveParams] = reserveCall;
+        expect(reserveParams[0]).toBe('k-miss');
+        expect(reserveParams[1]).toBe('POST /coffee-shops');
+
+        // Simulate the handler succeeding.
         res.statusCode = 200;
         res.json({ success: true, data: { id: 42 } });
 
-        // Give the fire-and-forget INSERT a tick to run.
         await new Promise((r) => setImmediate(r));
 
-        const insertCall = db.run.mock.calls.find(([sql]) => sql.includes('INSERT OR IGNORE INTO idempotency_keys'));
-        expect(insertCall).toBeDefined();
-        const [, params] = insertCall;
-        expect(params[0]).toBe('k-miss');                  // key
-        expect(params[1]).toBe('POST /coffee-shops');       // endpoint
-        expect(params[2]).toBe(200);                        // status_code
-        expect(JSON.parse(params[3])).toEqual({ success: true, data: { id: 42 } });
-        expect(typeof params[4]).toBe('number');            // created_at
+        const completeCall = db.run.mock.calls.find(([sql]) => sql.includes("status = 'completed'"));
+        expect(completeCall).toBeDefined();
+        const [, completeParams] = completeCall;
+        expect(completeParams[0]).toBe(200);                  // status_code
+        expect(JSON.parse(completeParams[1])).toEqual({ success: true, data: { id: 42 } });
+        expect(completeParams[2]).toBe('k-miss');             // key
+    });
+
+    it('5xx response: pending row released, NOT cached as completed', async () => {
+        const db = {
+            get: jest.fn().mockResolvedValue(undefined),
+            run: jest.fn().mockResolvedValue({ lastID: 1, changes: 1 }),
+        };
+        const middleware = withIdempotency({ db, logger: silentLogger });
+        const req = makeReq({ 'Idempotency-Key': 'k-err' });
+        const res = makeRes();
+        const next = jest.fn();
+
+        await middleware(req, res, next);
+        expect(next).toHaveBeenCalledTimes(1);
+
+        // Handler returns a 500.
+        res.statusCode = 500;
+        res.json({ success: false, error: { message: 'boom' } });
+
+        await new Promise((r) => setImmediate(r));
+
+        const completeCall = db.run.mock.calls.find(([sql]) => sql.includes("status = 'completed'"));
+        expect(completeCall).toBeUndefined();
+
+        const releaseCall = db.run.mock.calls.find(([sql]) => sql.includes("DELETE FROM idempotency_keys WHERE key = ? AND status = 'pending'"));
+        expect(releaseCall).toBeDefined();
+        expect(releaseCall[1][0]).toBe('k-err');
+    });
+
+    it('race lost: reservation INSERT reports changes === 0 → 409 IDEMPOTENCY_IN_PROGRESS', async () => {
+        const db = {
+            get: jest.fn().mockResolvedValue(undefined),
+            // The other concurrent request won the INSERT; ours is a no-op.
+            run: jest.fn().mockResolvedValue({ lastID: 0, changes: 0 }),
+        };
+        const middleware = withIdempotency({ db, logger: silentLogger });
+        const req = makeReq({ 'Idempotency-Key': 'k-race-lost' });
+        const res = makeRes();
+        const next = jest.fn();
+
+        await middleware(req, res, next);
+
+        expect(next).not.toHaveBeenCalled();
+        expect(res.statusCode).toBe(409);
+        expect(res.body.error.code).toBe('IDEMPOTENCY_IN_PROGRESS');
     });
 
     it('TTL expiry: lookup query filters by created_at > now-ttl; expired row → miss', async () => {
-        // First call uses a small ttl and the row is older — db.get is parametrised
-        // by `minCreated`, so the test verifies the parameter passed in.
         const db = {
             get: jest.fn().mockResolvedValue(undefined),
             run: jest.fn().mockResolvedValue({ lastID: 1, changes: 1 }),
@@ -134,37 +210,8 @@ describe('withIdempotency middleware', () => {
         expect(next).toHaveBeenCalledTimes(1);
         const lookupCall = db.get.mock.calls[0];
         const minCreated = lookupCall[1][1];
-        // minCreated should be roughly now-60. Allow a small drift window.
         expect(minCreated).toBeGreaterThanOrEqual(beforeNow - 61);
         expect(minCreated).toBeLessThanOrEqual(beforeNow - 59);
-    });
-
-    it('concurrent: two parallel identical requests both resolve cleanly', async () => {
-        // Simulate the race: both SELECTs return no row, both INSERT OR IGNOREs succeed
-        // (the second is silently a no-op in real sqlite — here we just verify the
-        // middleware doesn't throw on either path).
-        const db = {
-            get: jest.fn().mockResolvedValue(undefined),
-            run: jest.fn().mockResolvedValue({ lastID: 1, changes: 1 }),
-        };
-        const middleware = withIdempotency({ db, logger: silentLogger });
-
-        const runOne = async () => {
-            const req = makeReq({ 'Idempotency-Key': 'k-race' });
-            const res = makeRes();
-            const next = jest.fn();
-            await middleware(req, res, next);
-            res.json({ success: true });
-            return next;
-        };
-
-        const [next1, next2] = await Promise.all([runOne(), runOne()]);
-        expect(next1).toHaveBeenCalledTimes(1);
-        expect(next2).toHaveBeenCalledTimes(1);
-
-        await new Promise((r) => setImmediate(r));
-        const inserts = db.run.mock.calls.filter(([sql]) => sql.includes('INSERT OR IGNORE'));
-        expect(inserts).toHaveLength(2);
     });
 
     it('lookup failure: SELECT throws → falls through to handler (does NOT block writes)', async () => {
@@ -181,7 +228,7 @@ describe('withIdempotency middleware', () => {
 
         expect(next).toHaveBeenCalledTimes(1);
         // res.json was NOT wrapped (we never reached the wrap step), so a handler
-        // calling res.json should not attempt an INSERT.
+        // calling res.json should not attempt an UPDATE/DELETE.
         res.json({ ok: true });
         expect(db.run).not.toHaveBeenCalled();
     });

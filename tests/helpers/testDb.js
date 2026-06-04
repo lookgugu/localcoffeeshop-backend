@@ -89,15 +89,18 @@ function createTestDatabase() {
         db.run('CREATE INDEX idx_created_at ON coffee_shops(created_at DESC)');
         db.run('CREATE INDEX idx_search_covering ON coffee_shops(name, address, state, price_level)');
 
-        // Idempotency keys table — backs src/lib/idempotency.js
-        // (matches migrations/004_create_idempotency_keys.sql)
+        // Idempotency keys table — backs src/lib/idempotency.js.
+        // Combines migrations 004 + 005 (the `status` column was added in 005
+        // so the middleware can reserve a row before the handler runs and
+        // catch concurrent retries with the same key).
         db.run(`
           CREATE TABLE idempotency_keys (
             key         TEXT PRIMARY KEY,
             endpoint    TEXT NOT NULL,
             status_code INTEGER NOT NULL,
             response    TEXT NOT NULL,
-            created_at  INTEGER NOT NULL
+            created_at  INTEGER NOT NULL,
+            status      TEXT NOT NULL DEFAULT 'completed'
           )
         `);
         db.run('CREATE INDEX idx_idempotency_created_at ON idempotency_keys(created_at)', (err) => {

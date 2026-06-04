@@ -23,6 +23,46 @@ const SEARCH_TERM_PATTERN = /^[a-zA-Z0-9\s\-'.,&]+$/;
 const STATE_CODE_PATTERN = /^[A-Z]{2}$/;
 
 /**
+ * Validate raw search inputs.
+ *
+ * Throws `ValidationError` on the first failing rule; otherwise returns the
+ * normalised values used by `searchShops` below. Exported so the route layer
+ * can pre-validate before computing a cache key (a shared single source of
+ * truth — no duplicated regex/constants).
+ *
+ * @param {Object} input
+ * @returns {{ searchTerm: string, state: string, price: string, page: number, limit: number }}
+ */
+function validateSearchInput(input = {}) {
+    const searchTerm = typeof input.searchTerm === 'string' ? input.searchTerm : '';
+    const state = typeof input.state === 'string' ? input.state : '';
+    const price = typeof input.price === 'string' ? input.price : '';
+    const page = Math.max(1, parseInt(String(input.page ?? 1), 10) || 1);
+    const limit = Math.min(
+        Math.max(1, parseInt(String(input.limit ?? 100), 10) || 100),
+        MAX_LIMIT,
+    );
+
+    if (page > MAX_PAGE) {
+        throw new ValidationError(`Page number too high. Maximum page is ${MAX_PAGE}.`);
+    }
+    if (state && !STATE_CODE_PATTERN.test(state.toUpperCase())) {
+        throw new ValidationError('Invalid state code format. Expected 2-letter state abbreviation.');
+    }
+    if (price && !VALID_PRICE_LEVELS.has(price)) {
+        throw new ValidationError('Invalid price level. Must be one of: PRICE_LEVEL_INEXPENSIVE, PRICE_LEVEL_MODERATE, PRICE_LEVEL_EXPENSIVE');
+    }
+    if (searchTerm && searchTerm.length > MAX_SEARCH_TERM_LENGTH) {
+        throw new ValidationError('Search term too long. Maximum 100 characters.');
+    }
+    if (searchTerm && !SEARCH_TERM_PATTERN.test(searchTerm)) {
+        throw new ValidationError('Search term contains invalid characters. Only letters, numbers, spaces, and common punctuation allowed.');
+    }
+
+    return { searchTerm, state, price, page, limit };
+}
+
+/**
  * Build a search-shops use case bound to a `db` dependency.
  *
  * @param {{ db: Object }} deps
@@ -30,31 +70,8 @@ const STATE_CODE_PATTERN = /^[A-Z]{2}$/;
  */
 function makeSearchShopsUseCase({ db }) {
     return async function searchShops(input = {}) {
-        const searchTerm = typeof input.searchTerm === 'string' ? input.searchTerm : '';
-        const state = typeof input.state === 'string' ? input.state : '';
-        const price = typeof input.price === 'string' ? input.price : '';
-        const page = Math.max(1, parseInt(String(input.page ?? 1), 10) || 1);
-        const limit = Math.min(
-            Math.max(1, parseInt(String(input.limit ?? 100), 10) || 100),
-            MAX_LIMIT,
-        );
-
         // Validation — throw ValidationError; transport maps to 400.
-        if (page > MAX_PAGE) {
-            throw new ValidationError(`Page number too high. Maximum page is ${MAX_PAGE}.`);
-        }
-        if (state && !STATE_CODE_PATTERN.test(state.toUpperCase())) {
-            throw new ValidationError('Invalid state code format. Expected 2-letter state abbreviation.');
-        }
-        if (price && !VALID_PRICE_LEVELS.has(price)) {
-            throw new ValidationError('Invalid price level. Must be one of: PRICE_LEVEL_INEXPENSIVE, PRICE_LEVEL_MODERATE, PRICE_LEVEL_EXPENSIVE');
-        }
-        if (searchTerm && searchTerm.length > MAX_SEARCH_TERM_LENGTH) {
-            throw new ValidationError('Search term too long. Maximum 100 characters.');
-        }
-        if (searchTerm && !SEARCH_TERM_PATTERN.test(searchTerm)) {
-            throw new ValidationError('Search term contains invalid characters. Only letters, numbers, spaces, and common punctuation allowed.');
-        }
+        const { searchTerm, state, price, page, limit } = validateSearchInput(input);
 
         const offset = (page - 1) * limit;
 
@@ -133,4 +150,4 @@ function makeSearchShopsUseCase({ db }) {
     };
 }
 
-module.exports = { makeSearchShopsUseCase };
+module.exports = { makeSearchShopsUseCase, validateSearchInput };

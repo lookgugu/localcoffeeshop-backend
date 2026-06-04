@@ -23,7 +23,7 @@ const { sendSuccess } = require('../lib/responses');
 const { withIdempotency } = require('../lib/idempotency');
 const { ValidationError } = require('../usecases/errors');
 
-function extractShop(body) {
+function extractShop(body, enums) {
     if (!body || typeof body !== 'object') {
         throw new ValidationError('Request body must be a JSON object');
     }
@@ -43,8 +43,10 @@ function extractShop(body) {
     if (!address || typeof address !== 'string' || !address.trim()) {
         throw new ValidationError('shop.formattedAddress is required');
     }
-    if (!state || typeof state !== 'string' || !/^[A-Z]{2}$/.test(state.toUpperCase())) {
-        throw new ValidationError('shop.state is required and must be a 2-letter state code');
+    // Validate against the canonical State enum, not just the shape — 'XX'
+    // would otherwise pass the regex and reach the DB.
+    if (!state || typeof state !== 'string' || !enums.isStateCode(state)) {
+        throw new ValidationError('shop.state is required and must be a valid US state code');
     }
 
     return {
@@ -57,14 +59,14 @@ function extractShop(body) {
 }
 
 function mountCoffeeShops(router, deps) {
-    const { db, logger } = deps;
+    const { db, logger, enums } = deps;
     const idempotent = withIdempotency({ db, logger });
 
     router.post(
         '/coffee-shops',
         idempotent,
         asyncHandler(async (req, res) => {
-            const shop = extractShop(req.body);
+            const shop = extractShop(req.body, enums);
             const { lastID } = await db.run(
                 `INSERT INTO coffee_shops (name, address, price_level, language_code, state, source_file)
                  VALUES (?, ?, ?, ?, ?, ?)`,
@@ -90,7 +92,7 @@ function mountCoffeeShops(router, deps) {
             if (!Number.isInteger(id) || id <= 0) {
                 throw new ValidationError('Invalid shop id');
             }
-            const shop = extractShop(req.body);
+            const shop = extractShop(req.body, enums);
             const { changes } = await db.run(
                 `UPDATE coffee_shops
                  SET name = ?, address = ?, price_level = ?, language_code = ?, state = ?

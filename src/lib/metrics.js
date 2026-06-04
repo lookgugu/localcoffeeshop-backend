@@ -27,17 +27,25 @@ function buildMetrics() {
 
     promClient.collectDefaultMetrics({ register: registry });
 
+    // Pass `registers: [registry]` on each metric so they're scoped to this
+    // fresh registry only. Without it prom-client also auto-registers on its
+    // default global registry under fixed names, so calling `buildMetrics()`
+    // twice in the same process (e.g. multiple test servers) throws on
+    // duplicate metric-name registration.
+
     const httpDuration = new promClient.Histogram({
         name: 'http_request_duration_seconds',
         help: 'Duration of HTTP requests in seconds',
         labelNames: ['method', 'route', 'status_code'],
         buckets: [0.001, 0.005, 0.01, 0.05, 0.1, 0.5, 1, 5],
+        registers: [registry],
     });
 
     const httpTotal = new promClient.Counter({
         name: 'http_requests_total',
         help: 'Total number of HTTP requests',
         labelNames: ['method', 'route', 'status_code'],
+        registers: [registry],
     });
 
     const dbDuration = new promClient.Histogram({
@@ -45,32 +53,29 @@ function buildMetrics() {
         help: 'Duration of database queries in seconds',
         labelNames: ['query_type'],
         buckets: [0.001, 0.005, 0.01, 0.05, 0.1, 0.5, 1],
+        registers: [registry],
     });
 
     const dbErrors = new promClient.Counter({
         name: 'database_errors_total',
         help: 'Total number of database errors',
         labelNames: ['query_type'],
+        registers: [registry],
     });
 
     const cacheHits = new promClient.Counter({
         name: 'cache_hits_total',
         help: 'Total number of cache hits',
         labelNames: ['cache_key'],
+        registers: [registry],
     });
 
     const cacheMisses = new promClient.Counter({
         name: 'cache_misses_total',
         help: 'Total number of cache misses',
         labelNames: ['cache_key'],
+        registers: [registry],
     });
-
-    registry.registerMetric(httpDuration);
-    registry.registerMetric(httpTotal);
-    registry.registerMetric(dbDuration);
-    registry.registerMetric(dbErrors);
-    registry.registerMetric(cacheHits);
-    registry.registerMetric(cacheMisses);
 
     return {
         registry,

@@ -17,7 +17,7 @@ const { asyncHandler } = require('../lib/async-handler');
 function mountSeo(app, { db, enums, config }) {
     // Legacy /pages/states/<slug>.html → /html/state.html?code=XX
     app.get('/pages/states/:stateName.html', (req, res) => {
-        const stateName = req.params.stateName.replace('-', ' ');
+        const stateName = req.params.stateName.replace(/-/g, ' ');
         const stateCode = enums.stateCodeFromName(stateName);
         if (stateCode) {
             res.redirect(301, `/html/state.html?code=${stateCode}`);
@@ -46,13 +46,17 @@ function mountSeo(app, { db, enums, config }) {
         const baseUrl = config.frontendUrl || 'https://localcoffeeshop.co';
         const today = new Date().toISOString().split('T')[0];
 
-        const states = await db.all(`
-            SELECT DISTINCT
-                UPPER(SUBSTR(address, INSTR(address, ', ') + 2, 2)) as state_code
-            FROM coffee_shops
-            WHERE address LIKE '%, __ %'
-            ORDER BY state_code
-        `, [], 'get_sitemap_states');
+        // Read the indexed `state` column directly. The previous
+        // SUBSTR/INSTR scan of `address` was both slow and brittle for
+        // non-standard address formats.
+        const states = await db.all(
+            `SELECT DISTINCT state AS state_code
+             FROM coffee_shops
+             WHERE state IS NOT NULL AND state != ''
+             ORDER BY state_code`,
+            [],
+            'get_sitemap_states',
+        );
 
         let xml = `<?xml version="1.0" encoding="UTF-8"?>
 <urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">

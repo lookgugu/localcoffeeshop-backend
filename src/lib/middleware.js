@@ -58,7 +58,10 @@ function mountMiddleware(app, { config, logger, metrics }) {
         const originalEnd = res.end;
         const endFunc = function (...args) {
             const duration = (Date.now() - start) / 1000;
-            const route = req.route ? req.route.path : req.path;
+            // Static fallback (not req.path) — otherwise unmatched URLs from
+            // scanners or random paths each become a new Prometheus label,
+            // causing high-cardinality memory blow-up.
+            const route = req.route ? req.route.path : 'unmatched';
             metrics.httpDuration.labels(req.method, route, String(res.statusCode)).observe(duration);
             metrics.httpTotal.labels(req.method, route, String(res.statusCode)).inc();
             originalEnd.apply(res, args);
@@ -124,11 +127,14 @@ function mountMiddleware(app, { config, logger, metrics }) {
     }
 
     // 7. CORS
+    // PUT/DELETE need to be in `methods` so browser preflights for the write
+    // endpoints succeed; Idempotency-Key needs to be allowed so retries from
+    // a separate-origin frontend can flow through withIdempotency.
     app.use(cors({
         origin: config.corsOrigins === false ? false : config.corsOrigins,
         credentials: true,
-        methods: ['GET', 'POST', 'OPTIONS'],
-        allowedHeaders: ['Content-Type', 'Authorization'],
+        methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+        allowedHeaders: ['Content-Type', 'Authorization', 'Idempotency-Key'],
     }));
 
     if (config.corsOrigins === false) {

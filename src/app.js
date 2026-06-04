@@ -59,6 +59,7 @@ function buildApp({ config, db, cache, logger, metrics, enums }) {
         searchShopsUseCase,
         config,
         logger,
+        enums,
         packageJson,
     });
 

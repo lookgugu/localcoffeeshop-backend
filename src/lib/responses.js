@@ -7,8 +7,11 @@
  * internals. `sendSuccess` attaches `metadata` when supplied.
  *
  * Also exports `attachCacheHeaders(req, res, next)` — the envelope-wrapping
- * middleware that augments responses on the /api/v1 router with `Vary`,
- * `Last-Modified`, and `Cache-Control`.
+ * middleware that augments responses on the /api/v1 router with `Vary`
+ * and `Cache-Control`. (Handlers that know their underlying data's real
+ * modification time may set `Last-Modified` themselves; this middleware
+ * deliberately does NOT auto-set it, because a per-request `new Date()`
+ * makes every `If-Modified-Since` look stale and defeats 304 caching.)
  */
 
 /**
@@ -52,18 +55,18 @@ function sendSuccess(res, data, metadata = null) {
 }
 
 /**
- * Express middleware that adds `Vary`, `Last-Modified`, and a default
- * `Cache-Control` to successful JSON envelopes — only when the route handler
- * hasn't already set them. Mount on the /api/v1 router.
+ * Express middleware that adds `Vary` and a default `Cache-Control` to
+ * successful JSON envelopes — only when the route handler hasn't already set
+ * them. Mount on the /api/v1 router. `Last-Modified` is intentionally not
+ * defaulted here: setting it to "now" on every response makes conditional
+ * `If-Modified-Since` revalidation always return 200, never 304. Handlers
+ * with a real modification timestamp may set the header explicitly.
  */
 function attachCacheHeaders(req, res, next) {
     const originalJson = res.json.bind(res);
     res.json = function (body) {
         res.set('Vary', 'Accept-Encoding');
         if (res.statusCode === 200 && body?.success === true) {
-            if (!res.get('Last-Modified')) {
-                res.set('Last-Modified', new Date().toUTCString());
-            }
             if (!res.get('Cache-Control')) {
                 const cacheTime = req.path.includes('/search') ? 300 : 3600;
                 res.set('Cache-Control', `public, max-age=${cacheTime}`);

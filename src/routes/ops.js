@@ -51,7 +51,11 @@ function mountOps(router, { db, config, logger, packageJson }) {
 
         if (!isDbHealthy) {
             logger.warn({ health }, 'Health check failed - database error');
-            return res.status(503).json(health);
+            return res.status(503).json({
+                success: false,
+                error: { code: 'DB_UNHEALTHY', message: 'Database error' },
+                data: health,
+            });
         }
         if (req.query.detailed === 'true') {
             const row = await db.get('SELECT COUNT(*) as count FROM coffee_shops', [], 'health_check_detailed');
@@ -61,7 +65,7 @@ function mountOps(router, { db, config, logger, packageJson }) {
             };
         }
         logger.debug({ health }, 'Health check completed');
-        res.json(health);
+        sendSuccess(res, health);
     }));
 
     router.get('/config', (req, res) => {
@@ -73,7 +77,7 @@ function mountOps(router, { db, config, logger, packageJson }) {
             frontendUrl: config.frontendUrl || 'https://localcoffeeshop.co',
         };
         res.set('Cache-Control', 'public, max-age=3600');
-        res.json(clientConfig);
+        sendSuccess(res, clientConfig);
     });
 }
 

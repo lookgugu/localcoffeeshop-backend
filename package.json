@@ -4,7 +4,7 @@
   "description": "Backend API for Local Coffee Shop directory",
   "main": "src/server.js",
   "scripts": {
-    "start": "node src/server.js",
+    "start": "npm run migrate -- up && node src/server.js",
     "dev": "nodemon src/server.js",
     "test": "jest --detectOpenHandles --forceExit",
     "test:watch": "jest --watch",

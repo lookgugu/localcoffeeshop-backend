@@ -18,7 +18,7 @@ const fs = require('fs');
 const path = require('path');
 
 const DB_PATH = process.env.DB_PATH || './coffee_shops.db';
-const MIGRATIONS_DIR = path.join(__dirname, 'migrations');
+const MIGRATIONS_DIR = path.join(__dirname, '..', 'migrations');
 
 // Open database (not read-only for migrations)
 const db = new sqlite3.Database(DB_PATH, (err) => {
@@ -64,69 +64,74 @@ function getMigrationFiles() {
         .sort();
 }
 
-// Run a migration file
-function runMigration(filename, direction = 'up') {
+function runAsync(sql, params = []) {
     return new Promise((resolve, reject) => {
-        const filepath = path.join(MIGRATIONS_DIR, filename);
-        const content = fs.readFileSync(filepath, 'utf8');
-
-        // Split by -- migration:up and -- migration:down comments
-        const parts = content.split(/-- migration:(up|down)/i);
-
-        let sql;
-        if (direction === 'up') {
-            // Find the 'up' section
-            const upIndex = parts.findIndex(p => p.trim().toLowerCase() === 'up');
-            sql = upIndex >= 0 ? parts[upIndex + 1] : content;
-        } else {
-            // Find the 'down' section
-            const downIndex = parts.findIndex(p => p.trim().toLowerCase() === 'down');
-            sql = downIndex >= 0 ? parts[downIndex + 1] : '';
-        }
-
-        if (!sql || !sql.trim()) {
-            return reject(new Error(`No ${direction} migration found in ${filename}`));
-        }
-
-        // Run SQL statements (SQLite database exec, not shell command)
-        db.serialize(() => {
-            db.run('BEGIN TRANSACTION');
-            const statements = sql.split(';').filter(s => s.trim());
-            
-            let error = null;
-            for (const statement of statements) {
-                if (statement.trim()) {
-                    db.run(statement, (err) => {
-                        if (err && !error) error = err;
-                    });
-                }
-            }
-            
-            if (error) {
-                db.run('ROLLBACK', () => reject(error));
-            } else {
-                db.run('COMMIT', (err) => {
-                    if (err) {
-                        reject(err);
-                    } else {
-                        if (direction === 'up') {
-                            // Record migration as applied
-                            db.run('INSERT INTO migrations (name) VALUES (?)', [filename], (err) => {
-                                if (err) reject(err);
-                                else resolve();
-                            });
-                        } else {
-                            // Remove migration record
-                            db.run('DELETE FROM migrations WHERE name = ?', [filename], (err) => {
-                                if (err) reject(err);
-                                else resolve();
-                            });
-                        }
-                    }
-                });
-            }
+        db.run(sql, params, function (err) {
+            if (err) reject(err);
+            else resolve(this);
         });
     });
+}
+
+function execAsync(sql) {
+    return new Promise((resolve, reject) => {
+        db.exec(sql, (err) => {
+            if (err) reject(err);
+            else resolve();
+        });
+    });
+}
+
+function getMigrationSql(filename, direction = 'up') {
+    const filepath = path.join(MIGRATIONS_DIR, filename);
+    const content = fs.readFileSync(filepath, 'utf8');
+
+    // Split by -- migration:up and -- migration:down comments
+    const parts = content.split(/-- migration:(up|down)/i);
+
+    let sql;
+    if (direction === 'up') {
+        // Find the 'up' section
+        const upIndex = parts.findIndex(p => p.trim().toLowerCase() === 'up');
+        sql = upIndex >= 0 ? parts[upIndex + 1] : content;
+    } else {
+        // Find the 'down' section
+        const downIndex = parts.findIndex(p => p.trim().toLowerCase() === 'down');
+        sql = downIndex >= 0 ? parts[downIndex + 1] : '';
+    }
+
+    if (!sql || !sql.trim()) {
+        throw new Error(`No ${direction} migration found in ${filename}`);
+    }
+
+    return sql;
+}
+
+// Run a migration file
+async function runMigration(filename, direction = 'up') {
+    const sql = getMigrationSql(filename, direction);
+
+    await runAsync('BEGIN TRANSACTION');
+    try {
+        await execAsync(sql);
+
+        if (direction === 'up') {
+            // Record migration as applied inside the same transaction.
+            await runAsync('INSERT INTO migrations (name) VALUES (?)', [filename]);
+        } else {
+            // Remove migration record inside the same transaction.
+            await runAsync('DELETE FROM migrations WHERE name = ?', [filename]);
+        }
+
+        await runAsync('COMMIT');
+    } catch (err) {
+        try {
+            await runAsync('ROLLBACK');
+        } catch (rollbackErr) {
+            err.message = `${err.message}; rollback failed: ${rollbackErr.message}`;
+        }
+        throw err;
+    }
 }
 
 // Migrate up (apply pending migrations)

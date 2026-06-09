@@ -10,6 +10,7 @@
     "test:watch": "jest --watch",
     "test:coverage": "jest --coverage --detectOpenHandles --forceExit",
     "migrate": "node scripts/migrate.js",
+    "import:coordinates": "node scripts/import-coordinates.js",
     "backup": "node scripts/backup-database.js"
   },
   "dependencies": {

@@ -15,6 +15,7 @@ const { makeCachedRoute } = require('./lib/cached-route');
 const { sendError, sendSuccess } = require('./lib/responses');
 const { ValidationError } = require('./usecases/errors');
 const { makeSearchShopsUseCase } = require('./usecases/searchShops');
+const { makeNearbyShopsUseCase } = require('./usecases/nearbyShops');
 const { mountMetricsRoute } = require('./routes/metrics');
 const { mountApiV1 } = require('./routes/api-v1');
 const { mountSeo } = require('./routes/seo');
@@ -52,11 +53,13 @@ function buildApp({ config, db, cache, logger, metrics, enums }) {
         sendSuccess,
     });
     const searchShopsUseCase = makeSearchShopsUseCase({ db });
+    const nearbyShopsUseCase = makeNearbyShopsUseCase({ db });
 
     mountApiV1(app, {
         db,
         cached,
         searchShopsUseCase,
+        nearbyShopsUseCase,
         config,
         logger,
         enums,

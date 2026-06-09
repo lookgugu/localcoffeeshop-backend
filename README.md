@@ -63,6 +63,7 @@ Server runs at `http://localhost:3000`
 - `GET /states` - List all states with shop counts
 - `GET /states/:stateCode` - Get all shops for a state
 - `GET /search` - Search shops with filters (query, state, price)
+- `GET /nearby` - Search coordinate-bearing shops near `lat`/`lon` (or `lng`)
 - `GET /stats` - Database statistics
 
 ### Example Requests
@@ -76,6 +77,9 @@ curl http://localhost:3000/api/v1/states/CA
 
 # Search with filters
 curl "http://localhost:3000/api/v1/search?q=coffee&state=CA&price=PRICE_LEVEL_MODERATE"
+
+# Search for shops near Concord, MA
+curl "http://localhost:3000/api/v1/nearby?lat=42.4604&lon=-71.3489&limit=10"
 ```
 
 ## Database
@@ -92,7 +96,10 @@ CREATE TABLE coffee_shops (
     price_level TEXT,
     language_code TEXT DEFAULT 'en',
     source_file TEXT,
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    state TEXT,
+    latitude REAL,
+    longitude REAL
 )
 ```
 
@@ -101,6 +108,9 @@ CREATE TABLE coffee_shops (
 ```bash
 # Run migrations
 npm run migrate
+
+# Import coordinates after migration (CSV columns: id,latitude,longitude)
+DB_PATH=data/coffee_shops.db npm run import:coordinates -- coordinates.csv
 
 # Backup database
 npm run backup

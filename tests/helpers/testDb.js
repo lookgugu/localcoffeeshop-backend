@@ -32,7 +32,9 @@ function createTestDatabase() {
             language_code TEXT DEFAULT 'en',
             source_file TEXT,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            state TEXT
+            state TEXT,
+            latitude REAL,
+            longitude REAL
           )
         `, (err) => {
           if (err) {
@@ -88,6 +90,7 @@ function createTestDatabase() {
         db.run('CREATE INDEX idx_state_price_name ON coffee_shops(state, price_level, name)');
         db.run('CREATE INDEX idx_created_at ON coffee_shops(created_at DESC)');
         db.run('CREATE INDEX idx_search_covering ON coffee_shops(name, address, state, price_level)');
+        db.run('CREATE INDEX idx_coffee_shops_coordinates ON coffee_shops(latitude, longitude) WHERE latitude IS NOT NULL AND longitude IS NOT NULL');
 
         // Idempotency keys table — backs src/lib/idempotency.js.
         // Combines migrations 004 + 005 (the `status` column was added in 005

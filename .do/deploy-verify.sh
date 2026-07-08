@@ -11,7 +11,7 @@ errors=0
 
 # Check if required files exist
 echo "✓ Checking required files..."
-files=("server.js" "package.json" "coffee_shops.db" ".do/app.yaml")
+files=("server.js" "package.json" "coffee_shops.db" ".do/app-spec.yaml")
 for file in "${files[@]}"; do
     if [ ! -f "$file" ]; then
         echo "  ❌ Missing required file: $file"
@@ -107,7 +107,7 @@ if [ -f ".env.example" ]; then
     echo "  ✓ .env.example exists"
     echo "  ℹ️  Remember to set environment variables in Digital Ocean dashboard:"
     echo "      - NODE_ENV=production"
-    echo "      - PORT=8080"
+    echo "      - PORT=3000"
     echo "      - LOG_LEVEL=info"
 else
     echo "  ⚠️  .env.example not found"
@@ -140,25 +140,25 @@ else
 fi
 echo ""
 
-# Verify app.yaml configuration
-echo "✓ Checking app.yaml configuration..."
-if [ -f ".do/app.yaml" ]; then
-    if grep -q "repo: lookgugu/localcoffeeshop.co" .do/app.yaml; then
-        echo "  ⚠️  Remember to update GitHub repo in .do/app.yaml with your repository"
-        ((warnings++))
+# Verify app-spec.yaml configuration
+echo "✓ Checking app-spec.yaml configuration..."
+if [ -f ".do/app-spec.yaml" ]; then
+    if grep -q "repo: lookgugu/localcoffeeshop-backend" .do/app-spec.yaml; then
+        echo "  ✓ app-spec.yaml points at the correct GitHub repo"
     else
-        echo "  ✓ app.yaml appears to be configured"
+        echo "  ⚠️  app-spec.yaml is missing the expected repo (lookgugu/localcoffeeshop-backend)"
+        ((warnings++))
     fi
 
     # Check for required fields
-    if grep -q "run_command:" .do/app.yaml && grep -q "http_port:" .do/app.yaml; then
-        echo "  ✓ app.yaml has required fields"
+    if grep -q "run_command:" .do/app-spec.yaml && grep -q "http_port:" .do/app-spec.yaml; then
+        echo "  ✓ app-spec.yaml has required fields"
     else
-        echo "  ⚠️  app.yaml may be missing required fields"
+        echo "  ⚠️  app-spec.yaml may be missing required fields"
         ((warnings++))
     fi
 else
-    echo "  ❌ app.yaml not found"
+    echo "  ❌ app-spec.yaml not found"
     ((errors++))
 fi
 echo ""
@@ -201,7 +201,7 @@ if command -v git &> /dev/null && [ -d ".git" ]; then
     # Check if we're on main branch
     current_branch=$(git branch --show-current)
     if [ "$current_branch" != "main" ]; then
-        echo "  ⚠️  Current branch: $current_branch (app.yaml deploys from 'main')"
+        echo "  ⚠️  Current branch: $current_branch (app-spec.yaml deploys from 'main')"
         ((warnings++))
     else
         echo "  ✓ On main branch"
@@ -233,7 +233,7 @@ if [ $errors -eq 0 ]; then
     echo "3. → Create new app and link your repository"
     echo "4. → Set environment variables:"
     echo "     • NODE_ENV=production"
-    echo "     • PORT=8080"
+    echo "     • PORT=3000"
     echo "     • LOG_LEVEL=info"
     echo "5. → Deploy!"
     echo ""

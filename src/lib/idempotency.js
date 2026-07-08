@@ -32,6 +32,7 @@
 
 const TTL_SECONDS_DEFAULT = 86400; // 24h
 const SWEEP_PROBABILITY = 0.01; // 1% chance per completed write
+const MAX_KEY_LENGTH = 128; // reject oversized keys before reserving storage
 
 function withIdempotency({ db, ttlSeconds = TTL_SECONDS_DEFAULT, logger }) {
     return async function idempotencyMiddleware(req, res, next) {
@@ -39,6 +40,20 @@ function withIdempotency({ db, ttlSeconds = TTL_SECONDS_DEFAULT, logger }) {
         if (!key) return next();
 
         const log = req.log || logger;
+
+        // Bound the key length so a caller can't reserve arbitrarily large
+        // `pending` rows as a storage/DoS vector. The key is only ever used as
+        // a bound `?` parameter, so this is not an injection guard — purely a
+        // resource bound.
+        if (key.length > MAX_KEY_LENGTH) {
+            return res.status(400).json({
+                success: false,
+                error: {
+                    code: 'IDEMPOTENCY_KEY_TOO_LONG',
+                    message: `Idempotency-Key must be at most ${MAX_KEY_LENGTH} characters`,
+                },
+            });
+        }
 
         try {
             const minCreated = Math.floor(Date.now() / 1000) - ttlSeconds;

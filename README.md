@@ -137,7 +137,7 @@ npm test
 
 ### DigitalOcean App Platform
 
-Configured via `.do/app.yaml`. Auto-deploys from main branch.
+Configured via `.do/app-spec.yaml`. Auto-deploys from main branch.
 
 ```bash
 git push origin main

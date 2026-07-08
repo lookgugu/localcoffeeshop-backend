@@ -11,14 +11,16 @@ const { sendError } = require('../lib/responses');
 
 /**
  * Constant-time bearer-token comparison. Guards against timing side-channels
- * that could let an attacker recover the token byte-by-byte. Length is checked
- * first because timingSafeEqual throws on unequal-length buffers.
+ * that could let an attacker recover the token byte-by-byte. Both inputs are
+ * SHA-256 hashed first so the buffers are always 32 bytes — this avoids the
+ * unequal-length early return, which would otherwise leak the expected token's
+ * length. Comparing digests is safe: equal digests ⟺ equal tokens (collisions
+ * are infeasible).
  */
 function tokensMatch(provided, expected) {
     if (typeof provided !== 'string' || typeof expected !== 'string') return false;
-    const a = Buffer.from(provided);
-    const b = Buffer.from(expected);
-    if (a.length !== b.length) return false;
+    const a = crypto.createHash('sha256').update(provided).digest();
+    const b = crypto.createHash('sha256').update(expected).digest();
     return crypto.timingSafeEqual(a, b);
 }
 

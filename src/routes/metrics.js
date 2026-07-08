@@ -6,7 +6,21 @@
  * the endpoint refuses with 503.
  */
 
+const crypto = require('crypto');
 const { sendError } = require('../lib/responses');
+
+/**
+ * Constant-time bearer-token comparison. Guards against timing side-channels
+ * that could let an attacker recover the token byte-by-byte. Length is checked
+ * first because timingSafeEqual throws on unequal-length buffers.
+ */
+function tokensMatch(provided, expected) {
+    if (typeof provided !== 'string' || typeof expected !== 'string') return false;
+    const a = Buffer.from(provided);
+    const b = Buffer.from(expected);
+    if (a.length !== b.length) return false;
+    return crypto.timingSafeEqual(a, b);
+}
 
 function mountMetricsRoute(app, { metrics, config, logger }) {
     app.get('/metrics', async (req, res) => {
@@ -20,7 +34,7 @@ function mountMetricsRoute(app, { metrics, config, logger }) {
         const token = authHeader && authHeader.startsWith('Bearer ')
             ? authHeader.substring(7)
             : null;
-        if (!token || token !== config.metricsAuthToken) {
+        if (!token || !tokensMatch(token, config.metricsAuthToken)) {
             logger.warn({ ip: req.ip }, 'Unauthorized metrics access attempt');
             return sendError(res, 401, 'Unauthorized. Valid Bearer token required.');
         }
@@ -30,7 +44,8 @@ function mountMetricsRoute(app, { metrics, config, logger }) {
             res.end(await metrics.registry.metrics());
         } catch (err) {
             logger.error({ err }, 'Error generating metrics');
-            res.status(500).end(err.message);
+            // Don't leak internal error details to the client, even behind auth.
+            res.status(500).end('Internal Server Error');
         }
     });
 }

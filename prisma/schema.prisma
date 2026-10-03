@@ -1,0 +1,235 @@
+datasource db {
+  provider   = "postgresql"
+  url        = env("DATABASE_URL")
+  extensions = [postgis]
+}
+
+generator client {
+  provider        = "prisma-client-js"
+  previewFeatures = ["postgresqlExtensions"]
+}
+
+// ---------------------------------------------------------
+// ENUMS
+// ---------------------------------------------------------
+
+enum PriceLevel {
+  INEXPENSIVE // $
+  MODERATE // $$
+  EXPENSIVE // $$$
+  SPECIALTY // $$$$
+}
+
+enum RoasterType {
+  IN_HOUSE_ONLY // Roasts 100% of their own beans
+  MULTI_ROASTER // Rotates third-party guest roasters
+  HYBRID // Roasts in-house with guest offerings
+  EXCLUSIVE_PARTNER // Single exclusive wholesale partner
+}
+
+enum RoasterRole {
+  PRIMARY_HOUSE
+  FEATURED_GUEST
+  ANCHOR_PARTNER
+}
+
+enum BrewMethod {
+  BATCH_BREW
+  POUR_OVER_V60
+  POUR_OVER_KALITA
+  POUR_OVER_CHEMEX
+  POUR_OVER_AEROPRESS
+  ESPRESSO_MANUAL
+  ESPRESSO_AUTOMATED
+  COLD_BREW
+  NITRO_COLD_BREW
+  SIPHON
+}
+
+enum RoastSpectrum {
+  LIGHT_NORDIC
+  MEDIUM_BALANCED
+  DARK_TRADITIONAL
+}
+
+enum DecafProcess {
+  SWISS_WATER
+  SUGARCANE_EA
+  MOUNTAIN_WATER
+  SUPERCRITICAL_CO2
+  STANDARD_COMMERCIAL
+}
+
+enum LaptopPolicy {
+  LAPTOP_FRIENDLY
+  WEEKDAYS_ONLY
+  RESTRICTED_ZONES
+  LAPTOP_FREE
+}
+
+enum PowerOutletAvailability {
+  ABUNDANT
+  MODERATE
+  SCARCE
+  NONE
+}
+
+enum NoiseLevel {
+  QUIET_STUDY
+  MODERATE_BUZZ
+  LIVELY_HIGH
+}
+
+// ---------------------------------------------------------
+// CORE MODELS
+// ---------------------------------------------------------
+
+model Cafe {
+  id              String      @id @default(cuid())
+  slug            String      @unique
+  name            String
+  description     String?     @db.Text
+  phone           String?
+  websiteUrl      String?
+  instagramHandle String?
+  priceLevel      PriceLevel  @default(MODERATE)
+  roasterType     RoasterType @default(MULTI_ROASTER)
+
+  // Geographic attributes
+  streetAddress String
+  city          String
+  stateCode     String                                @db.VarChar(2)
+  postalCode    String
+  countryCode   String                                @default("US") @db.VarChar(2)
+  latitude      Float
+  longitude     Float
+  coordinates   Unsupported("geometry(Point, 4326)")?
+
+  // Verification & Status
+  isClaimed  Boolean   @default(false)
+  isVerified Boolean   @default(false)
+  claimedAt  DateTime?
+
+  // Relations
+  workspaceProfile WorkspaceProfile?
+  coffeeProgram    CoffeeProgram?
+  roasters         CafeRoaster[]
+  checkIns         CommunityCheckIn[]
+  operatingHours   OperatingHour[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([stateCode, city])
+  @@index([latitude, longitude])
+  @@index([isVerified])
+  @@index([coordinates], type: Gist)
+}
+
+model Roaster {
+  id          String  @id @default(cuid())
+  slug        String  @unique
+  name        String
+  originCity  String
+  originState String? @db.VarChar(2)
+  countryCode String  @default("US") @db.VarChar(2)
+  websiteUrl  String?
+  isSpecialty Boolean @default(true)
+
+  cafesServed CafeRoaster[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([originState])
+}
+
+model CafeRoaster {
+  id         String      @id @default(cuid())
+  cafeId     String
+  roasterId  String
+  role       RoasterRole @default(FEATURED_GUEST)
+  isActive   Boolean     @default(true)
+  lastSeenAt DateTime    @default(now())
+
+  cafe    Cafe    @relation(fields: [cafeId], references: [id], onDelete: Cascade)
+  roaster Roaster @relation(fields: [roasterId], references: [id], onDelete: Cascade)
+
+  @@unique([cafeId, roasterId])
+  @@index([cafeId, isActive])
+  @@index([roasterId])
+}
+
+model CoffeeProgram {
+  id     String @id @default(cuid())
+  cafeId String @unique
+  cafe   Cafe   @relation(fields: [cafeId], references: [id], onDelete: Cascade)
+
+  brewMethods    BrewMethod[]
+  roastProfiles  RoastSpectrum[]
+  decafProcesses DecafProcess[]
+
+  plantMilksOffered    String[]
+  hasAltMilkUpcharge   Boolean  @default(false)
+  altMilkUpchargeCents Int?
+
+  espressoMachine String?
+  grinderSpecs    String?
+
+  updatedAt DateTime @updatedAt
+}
+
+model WorkspaceProfile {
+  id     String @id @default(cuid())
+  cafeId String @unique
+  cafe   Cafe   @relation(fields: [cafeId], references: [id], onDelete: Cascade)
+
+  laptopPolicy LaptopPolicy            @default(LAPTOP_FRIENDLY)
+  powerOutlets PowerOutletAvailability @default(MODERATE)
+  noiseLevel   NoiseLevel              @default(MODERATE_BUZZ)
+
+  hasWifi           Boolean @default(true)
+  wifiSpeedMbpsDown Float?
+  wifiSpeedMbpsUp   Float?
+  requiresWifiPass  Boolean @default(false)
+
+  hasOutdoorPatio           Boolean @default(false)
+  isDogFriendly             Boolean @default(false)
+  hasGenderNeutralBathrooms Boolean @default(false)
+  hasFullKitchen            Boolean @default(false)
+  hasDedicatedQuietZone     Boolean @default(false)
+
+  updatedAt DateTime @updatedAt
+
+  @@index([laptopPolicy])
+}
+
+model OperatingHour {
+  id        String  @id @default(cuid())
+  cafeId    String
+  dayOfWeek Int // 0 = Sunday, 1 = Monday ... 6 = Saturday
+  openTime  String // "07:00"
+  closeTime String // "17:00"
+  isClosed  Boolean @default(false)
+
+  cafe Cafe @relation(fields: [cafeId], references: [id], onDelete: Cascade)
+
+  @@unique([cafeId, dayOfWeek])
+}
+
+model CommunityCheckIn {
+  id     String @id @default(cuid())
+  cafeId String
+  cafe   Cafe   @relation(fields: [cafeId], references: [id], onDelete: Cascade)
+
+  isLaptopWorkAllowed Boolean?
+  reportedOutlets     PowerOutletAvailability?
+  beansOnBar          String?
+  testedWifiDownMbps  Float?
+
+  clientIpHash String
+  isFlagged    Boolean  @default(false)
+  createdAt    DateTime @default(now())
+
+  @@index([cafeId, createdAt])
+}

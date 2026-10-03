@@ -119,6 +119,39 @@ npm run backup
 sqlite3 data/coffee_shops.db
 ```
 
+### PostgreSQL + PostGIS (redesign schema)
+
+The redesign's domain model (cafes, roasters, coffee programs, workspace
+profiles, hours, community check-ins) lives in `prisma/schema.prisma`, with
+migrations in `prisma/migrations/`. It is not yet wired into the API; the
+running server still reads SQLite.
+
+Requirements: PostgreSQL 14+ with the PostGIS extension available, and
+`DATABASE_URL` set (see `.env.example`).
+
+```bash
+npm run prisma:deploy     # apply migrations (enables postgis)
+npm run prisma:generate   # generate the Prisma client
+npm run prisma:migrate    # dev: create a migration after editing schema.prisma
+```
+
+Write `latitude`/`longitude` only: a trigger derives the PostGIS
+`coordinates` column from them, since the Prisma client cannot write
+`Unsupported` fields. For radius search, query on geography so the
+`Cafe_coordinates_geography_idx` index is used:
+
+```sql
+SELECT id FROM "Cafe"
+WHERE ST_DWithin("coordinates"::geography,
+                 ST_SetSRID(ST_MakePoint($lng, $lat), 4326)::geography,
+                 $meters);
+```
+
+The trigger, the geography index and CHECK constraints are hand-written in
+the initial migration; Prisma Migrate does not diff them, so they don't
+cause drift. Run the schema tests against a disposable database with
+`PRISMA_TEST_DATABASE_URL=... npm run test:prisma`.
+
 ## Security
 
 - **Rate Limiting**: 100 requests per 15 minutes per IP

@@ -13,7 +13,7 @@
  *   - lookup failure:  SELECT throws → falls through to handler
  */
 
-const { withIdempotency } = require('../../../src/lib/idempotency');
+const { withIdempotency, requestFingerprint } = require('../../../src/lib/idempotency');
 
 function makeRes() {
     const res = {
@@ -39,11 +39,13 @@ function makeRes() {
     return res;
 }
 
-function makeReq(headers = {}, { method = 'POST', path = '/coffee-shops' } = {}) {
+function makeReq(headers = {}, { method = 'POST', path = '/coffee-shops', params = {}, body = {} } = {}) {
     const lower = Object.fromEntries(Object.entries(headers).map(([k, v]) => [k.toLowerCase(), v]));
     return {
         method,
         path,
+        params,
+        body,
         route: { path },
         get(name) { return lower[name.toLowerCase()]; },
     };
@@ -79,7 +81,9 @@ describe('withIdempotency middleware', () => {
     it('on completed hit: replays cached body, sets Idempotent-Replay, skips handler', async () => {
         const cachedBody = JSON.stringify({ success: true, data: { id: 7 } });
         const db = {
-            get: jest.fn().mockResolvedValue({ status_code: 201, response: cachedBody, status: 'completed' }),
+            get: jest.fn().mockResolvedValue({
+                status_code: 201, response: cachedBody, status: 'completed', request_hash: requestFingerprint(makeReq()),
+            }),
             run: jest.fn(),
         };
         const middleware = withIdempotency({ db, logger: silentLogger });
@@ -98,7 +102,9 @@ describe('withIdempotency middleware', () => {
 
     it('on pending hit: returns 409 IDEMPOTENCY_IN_PROGRESS, skips handler', async () => {
         const db = {
-            get: jest.fn().mockResolvedValue({ status_code: 0, response: '', status: 'pending' }),
+            get: jest.fn().mockResolvedValue({
+                status_code: 0, response: '', status: 'pending', request_hash: requestFingerprint(makeReq()),
+            }),
             run: jest.fn(),
         };
         const middleware = withIdempotency({ db, logger: silentLogger });
@@ -212,6 +218,115 @@ describe('withIdempotency middleware', () => {
         const minCreated = lookupCall[1][1];
         expect(minCreated).toBeGreaterThanOrEqual(beforeNow - 61);
         expect(minCreated).toBeLessThanOrEqual(beforeNow - 59);
+    });
+
+    describe('request fingerprint (key reuse with a different request)', () => {
+        const original = { method: 'POST', path: '/coffee-shops', body: { shop: { displayName: { text: 'A' } } } };
+
+        it('reservation stores a fingerprint of method, route, params and body', async () => {
+            const db = {
+                get: jest.fn().mockResolvedValue(undefined),
+                run: jest.fn().mockResolvedValue({ lastID: 1, changes: 1 }),
+            };
+            const middleware = withIdempotency({ db, logger: silentLogger });
+            await middleware(makeReq({ 'Idempotency-Key': 'k-fp' }, original), makeRes(), jest.fn());
+
+            const [sql, params] = db.run.mock.calls.find(([s]) => s.includes('INSERT OR IGNORE'));
+            expect(sql).toMatch(/request_hash/);
+            expect(params).toContain(requestFingerprint(makeReq({}, original)));
+            expect(requestFingerprint(makeReq({}, original))).toMatch(/^[0-9a-f]{64}$/);
+        });
+
+        it('fingerprint differs for a different body, method, route or params', () => {
+            const base = requestFingerprint(makeReq({}, original));
+            expect(requestFingerprint(makeReq({}, { ...original, body: { shop: { displayName: { text: 'B' } } } }))).not.toBe(base);
+            expect(requestFingerprint(makeReq({}, { ...original, method: 'PUT' }))).not.toBe(base);
+            expect(requestFingerprint(makeReq({}, { ...original, path: '/coffee-shops/:id', params: { id: '1' } })))
+                .not.toBe(requestFingerprint(makeReq({}, { ...original, path: '/coffee-shops/:id', params: { id: '2' } })));
+        });
+
+        it('completed row with matching fingerprint replays', async () => {
+            const hash = requestFingerprint(makeReq({}, original));
+            const db = {
+                get: jest.fn().mockResolvedValue({ status_code: 202, response: '{"success":true}', status: 'completed', request_hash: hash }),
+                run: jest.fn(),
+            };
+            const res = makeRes();
+            const next = jest.fn();
+            await withIdempotency({ db, logger: silentLogger })(makeReq({ 'Idempotency-Key': 'k' }, original), res, next);
+
+            expect(next).not.toHaveBeenCalled();
+            expect(res.statusCode).toBe(202);
+            expect(res.headers['idempotent-replay']).toBe('true');
+        });
+
+        it.each(['completed', 'pending'])('%s row with a different fingerprint → 422 IDEMPOTENCY_KEY_REUSED, handler skipped, row untouched', async (status) => {
+            const db = {
+                get: jest.fn().mockResolvedValue({ status_code: 202, response: '{"success":true}', status, request_hash: 'f'.repeat(64) }),
+                run: jest.fn(),
+            };
+            const res = makeRes();
+            const next = jest.fn();
+            await withIdempotency({ db, logger: silentLogger })(makeReq({ 'Idempotency-Key': 'k' }, original), res, next);
+
+            expect(next).not.toHaveBeenCalled();
+            expect(res.statusCode).toBe(422);
+            expect(res.body.error.code).toBe('IDEMPOTENCY_KEY_REUSED');
+            expect(res.headers['idempotent-replay']).toBeUndefined();
+            expect(db.run).not.toHaveBeenCalled();
+        });
+
+        it.each(['completed', 'pending'])(
+            'legacy %s row without a fingerprint fails closed (422) — never replays a pre-moderation response',
+            async (status) => {
+                const db = {
+                    get: jest.fn().mockResolvedValue({ status_code: 200, response: '{"success":true,"data":{"id":1}}', status, request_hash: null }),
+                    run: jest.fn(),
+                };
+                const res = makeRes();
+                const next = jest.fn();
+                await withIdempotency({ db, logger: silentLogger })(makeReq({ 'Idempotency-Key': 'k' }, original), res, next);
+                expect(next).not.toHaveBeenCalled();
+                expect(res.statusCode).toBe(422);
+                expect(res.body.error.code).toBe('IDEMPOTENCY_KEY_REUSED');
+                expect(res.headers['idempotent-replay']).toBeUndefined();
+                expect(res.rawBody).toBeNull();
+                expect(db.run).not.toHaveBeenCalled();
+            },
+        );
+    });
+
+    describe('key format', () => {
+        it.each([
+            ['contains a space', 'has space'],
+            ['contains a quote', 'a"b'],
+            ['contains non-ASCII', 'clé'],
+            ['is 129 characters', 'k'.repeat(129)],
+        ])('rejects a key that %s with 400 before touching storage', async (_label, key) => {
+            const db = { get: jest.fn(), run: jest.fn() };
+            const res = makeRes();
+            const next = jest.fn();
+            await withIdempotency({ db, logger: silentLogger })(makeReq({ 'Idempotency-Key': key }), res, next);
+
+            expect(next).not.toHaveBeenCalled();
+            expect(res.statusCode).toBe(400);
+            expect(['IDEMPOTENCY_KEY_INVALID', 'IDEMPOTENCY_KEY_TOO_LONG']).toContain(res.body.error.code);
+            expect(db.get).not.toHaveBeenCalled();
+            expect(db.run).not.toHaveBeenCalled();
+        });
+
+        it.each([['a UUID', '0b0e6f9c-3f59-4c43-9d55-1f4f2d0f8a11'], ['128 safe chars', 'A1._:-'.repeat(21) + 'xy']])(
+            'accepts %s',
+            async (_label, key) => {
+                const db = {
+                    get: jest.fn().mockResolvedValue(undefined),
+                    run: jest.fn().mockResolvedValue({ lastID: 1, changes: 1 }),
+                };
+                const next = jest.fn();
+                await withIdempotency({ db, logger: silentLogger })(makeReq({ 'Idempotency-Key': key }), makeRes(), next);
+                expect(next).toHaveBeenCalledTimes(1);
+            },
+        );
     });
 
     it('lookup failure: SELECT throws → falls through to handler (does NOT block writes)', async () => {

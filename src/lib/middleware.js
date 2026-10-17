@@ -9,13 +9,14 @@
  *   5. helmet                (security headers)
  *   6. https enforcement    (production only; skipped for health checks)
  *   7. cors
- *   8. json body parser     (10kb limit)
  *   9. cache-busting for .js/.css static asset paths
  *  10. static asset serving (production: /dist immutable, /public 1d; dev: /public 1d)
  *  11. rate-limit           (mounted on /api/ — AFTER cors, BEFORE the router)
+ *  12. write rate-limit     (mounted on /api/ — POST/PUT/PATCH/DELETE only)
+ *  13. json body parser     (10kb limit) — AFTER the limiters so rejected
+ *                           bodies still spend the budget
  *
- * Rate-limit must come last in this list because it's mounted on a path
- * prefix; the prior global middleware needs to wrap it.
+ * (Step 8 is intentionally vacant: the body parser used to sit there.)
  */
 
 const crypto = require('crypto');
@@ -27,6 +28,8 @@ const cors = require('cors');
 const rateLimit = require('express-rate-limit');
 const express = require('express');
 const pinoHttp = require('pino-http');
+
+const WRITE_METHODS = new Set(['POST', 'PUT', 'PATCH', 'DELETE']);
 
 /**
  * Mount the full ordered middleware stack on the app.
@@ -146,9 +149,6 @@ function mountMiddleware(app, { config, logger, metrics }) {
         );
     }
 
-    // 8. JSON body parser with size limit
-    app.use(express.json({ limit: '10kb' }));
-
     // 9. Cache-busting for JS/CSS — forces revalidation while still caching
     app.use((req, res, next) => {
         if (req.path.endsWith('.js') || req.path.endsWith('.css')) {
@@ -187,6 +187,42 @@ function mountMiddleware(app, { config, logger, metrics }) {
         legacyHeaders: false,
     });
     app.use('/api/', apiLimiter);
+
+    // 12. Write rate limit — one strict per-client budget for EVERY write
+    //     method anywhere under /api (the /api/v1 router, the legacy /api/*
+    //     redirect alias, and any spelling Express would route — it matches
+    //     paths case-insensitively and ignores a trailing slash). Mounted on
+    //     the prefix rather than per route so a new write route, or a path
+    //     variant, cannot silently escape it. Keyed on req.ip, which only
+    //     honours X-Forwarded-For through the configured `trust proxy` hops,
+    //     so client-supplied forwarding headers cannot mint fresh budgets.
+    //     Runs before validation and idempotency: invalid requests and
+    //     rotated Idempotency-Key values spend the budget too.
+    const writeLimiter = /** @type {any} */ (rateLimit)({
+        windowMs: config.writeRateLimitWindowMs,
+        max: config.writeRateLimitMax,
+        standardHeaders: true,
+        legacyHeaders: false,
+        skip: (req) => !WRITE_METHODS.has(req.method),
+        handler: (req, res, next, options) => {
+            res.status(options.statusCode).json({
+                success: false,
+                error: {
+                    code: 'RATE_LIMITED',
+                    message: 'Too many submissions from this address. Please try again later.',
+                    statusCode: options.statusCode,
+                    requestId: req.id,
+                },
+            });
+        },
+    });
+    app.use('/api/', writeLimiter);
+
+    // 13. JSON body parser with size limit — AFTER both limiters, so a
+    //     malformed or oversized body (rejected here with 400/413) has
+    //     already spent the caller's budget and cannot be used to probe or
+    //     burn CPU for free.
+    app.use(express.json({ limit: '10kb' }));
 
     // ETag config used by route handlers
     app.set('etag', 'strong');

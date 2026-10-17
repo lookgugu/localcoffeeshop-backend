@@ -12,4 +12,18 @@ class ValidationError extends Error {
     }
 }
 
-module.exports = { ValidationError };
+/**
+ * A bounded resource is exhausted or a feature is switched off. The route
+ * layer maps this to 503 with a Retry-After hint; `code` is the stable
+ * machine-readable reason.
+ */
+class UnavailableError extends Error {
+    constructor(code, message, retryAfterSeconds = 3600) {
+        super(message);
+        this.name = 'UnavailableError';
+        this.code = code;
+        this.retryAfterSeconds = retryAfterSeconds;
+    }
+}
+
+module.exports = { ValidationError, UnavailableError };

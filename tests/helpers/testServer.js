@@ -26,13 +26,15 @@ function silentLogger() {
 /**
  * Start a test server on a random available port.
  * @param {import('sqlite3').Database} [testDb] Optional test database
- * @returns {Promise<{server: import('http').Server, url: string, port: number}>}
+ * @param {Object} [opts]
+ * @param {Object} [opts.env] Env overrides merged over process.env for loadConfig
+ * @returns {Promise<{server: import('http').Server, url: string, port: number, app: import('express').Application}>}
  */
-async function startTestServer(testDb = null) {
+async function startTestServer(testDb = null, { env = {} } = {}) {
   const logger = silentLogger();
   const metrics = buildMetrics();
   const cache = new QueryCache({ maxEntries: 10000 });
-  const config = loadConfig(process.env);
+  const config = loadConfig({ ...process.env, ...env });
 
   if (testDb) {
     // Initialize the db module so it has a valid logger/metrics for any code
@@ -70,7 +72,7 @@ async function startTestServer(testDb = null) {
       }
       const port = server.address().port;
       serverUrl = `http://localhost:${port}`;
-      resolve({ server, url: serverUrl, port });
+      resolve({ server, url: serverUrl, port, app });
     });
   });
 }

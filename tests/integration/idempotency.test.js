@@ -1,8 +1,10 @@
 /**
  * Integration Tests — POST /coffee-shops with Idempotency-Key
  *
- * End-to-end: same key → second POST replays without a second DB insert.
- * Different keys → two real inserts.
+ * End-to-end: same key → second POST replays without a second queued
+ * submission. Different keys → two real submissions. Public writes land in
+ * the `shop_submissions` moderation queue (202 pending review); the
+ * published `coffee_shops` table is never touched.
  */
 
 const request = require('supertest');
@@ -18,22 +20,28 @@ const validShop = {
     },
 };
 
+function countSubmissions(db, name) {
+    return queryAll(db, 'SELECT id FROM shop_submissions WHERE name = ?', [name]).then((r) => r.length);
+}
+
 describe('Idempotency — POST /api/v1/coffee-shops', () => {
     let db;
     let baseURL;
 
     beforeAll(async () => {
         db = await createTestDatabase();
-        const info = await startTestServer(db);
+        const info = await startTestServer(db, { env: { WRITE_RATE_LIMIT_MAX: '1000' } });
         baseURL = info.url;
     });
 
     afterAll(async () => {
+        // No test in this file may publish anything.
+        expect(await queryAll(db, 'SELECT id FROM coffee_shops')).toHaveLength(0);
         await stopTestServer();
         await closeDatabase(db);
     });
 
-    it('same Idempotency-Key returns the cached response without a second DB insert', async () => {
+    it('same Idempotency-Key returns the cached response without a second queued submission', async () => {
         const key = 'integration-key-1';
 
         const first = await request(baseURL)
@@ -41,57 +49,43 @@ describe('Idempotency — POST /api/v1/coffee-shops', () => {
             .set('Idempotency-Key', key)
             .send(validShop);
 
-        expect(first.status).toBe(200);
+        expect(first.status).toBe(202);
         expect(first.body.success).toBe(true);
-        expect(first.body.data.id).toBeGreaterThan(0);
+        expect(first.body.data.status).toBe('pending_review');
+        expect(first.body.data.submissionId).toBeGreaterThan(0);
         expect(first.headers['idempotent-replay']).toBeUndefined();
 
-        const shopsAfterFirst = await queryAll(db, 'SELECT id FROM coffee_shops WHERE name = ?', ['Test Shop']);
-        const insertedCountAfterFirst = shopsAfterFirst.length;
+        const countAfterFirst = await countSubmissions(db, 'Test Shop');
+        expect(countAfterFirst).toBe(1);
 
         const second = await request(baseURL)
             .post('/api/v1/coffee-shops')
             .set('Idempotency-Key', key)
             .send(validShop);
 
-        expect(second.status).toBe(200);
+        expect(second.status).toBe(202);
         expect(second.body).toEqual(first.body);
         expect(second.headers['idempotent-replay']).toBe('true');
 
-        const shopsAfterSecond = await queryAll(db, 'SELECT id FROM coffee_shops WHERE name = ?', ['Test Shop']);
-        expect(shopsAfterSecond.length).toBe(insertedCountAfterFirst);
+        expect(await countSubmissions(db, 'Test Shop')).toBe(countAfterFirst);
     });
 
-    it('different Idempotency-Key values produce two real inserts', async () => {
-        const before = await queryAll(db, 'SELECT id FROM coffee_shops WHERE name = ?', ['Distinct Shop']);
-        const startCount = before.length;
+    it('different Idempotency-Key values produce two real submissions', async () => {
+        const startCount = await countSubmissions(db, 'Distinct Shop');
+        const body = {
+            shop: {
+                displayName: { text: 'Distinct Shop' },
+                formattedAddress: '1 Pine St, Seattle, WA 98101',
+                state: 'WA',
+                priceLevel: 'PRICE_LEVEL_INEXPENSIVE',
+            },
+        };
 
-        await request(baseURL)
-            .post('/api/v1/coffee-shops')
-            .set('Idempotency-Key', 'integration-key-A')
-            .send({
-                shop: {
-                    displayName: { text: 'Distinct Shop' },
-                    formattedAddress: '1 Pine St, Seattle, WA 98101',
-                    state: 'WA',
-                    priceLevel: 'PRICE_LEVEL_INEXPENSIVE',
-                },
-            });
+        const a = await request(baseURL).post('/api/v1/coffee-shops').set('Idempotency-Key', 'integration-key-A').send(body);
+        const b = await request(baseURL).post('/api/v1/coffee-shops').set('Idempotency-Key', 'integration-key-B').send(body);
+        expect([a.status, b.status]).toEqual([202, 202]);
 
-        await request(baseURL)
-            .post('/api/v1/coffee-shops')
-            .set('Idempotency-Key', 'integration-key-B')
-            .send({
-                shop: {
-                    displayName: { text: 'Distinct Shop' },
-                    formattedAddress: '1 Pine St, Seattle, WA 98101',
-                    state: 'WA',
-                    priceLevel: 'PRICE_LEVEL_INEXPENSIVE',
-                },
-            });
-
-        const after = await queryAll(db, 'SELECT id FROM coffee_shops WHERE name = ?', ['Distinct Shop']);
-        expect(after.length).toBe(startCount + 2);
+        expect(await countSubmissions(db, 'Distinct Shop')).toBe(startCount + 2);
     });
 
     it('no Idempotency-Key header → handler runs normally, nothing stored in idempotency_keys', async () => {
@@ -109,7 +103,7 @@ describe('Idempotency — POST /api/v1/coffee-shops', () => {
                 },
             });
 
-        expect(res.status).toBe(200);
+        expect(res.status).toBe(202);
         expect(res.body.success).toBe(true);
         expect(res.headers['idempotent-replay']).toBeUndefined();
 
@@ -133,7 +127,7 @@ describe('Idempotency — POST /api/v1/coffee-shops', () => {
             .send(badShop);
         expect(first.status).toBe(400);
 
-        // The pending reservation should have been released on the non-2xx response.
+        // Validation runs before idempotency: no row was ever reserved.
         const rows = await queryAll(db, 'SELECT status FROM idempotency_keys WHERE key = ?', [key]);
         expect(rows.length).toBe(0);
 
@@ -149,11 +143,61 @@ describe('Idempotency — POST /api/v1/coffee-shops', () => {
                     priceLevel: 'PRICE_LEVEL_MODERATE',
                 },
             });
-        expect(second.status).toBe(200);
+        expect(second.status).toBe(202);
         expect(second.headers['idempotent-replay']).toBeUndefined();
     });
 
-    it('concurrent requests with the same key: at most one insert; the loser sees 409 or replay', async () => {
+    describe('key reuse with a different request', () => {
+        const original = {
+            shop: {
+                displayName: { text: 'Reuse Original' },
+                formattedAddress: '7 Reuse Rd, Portland, Oregon 97201',
+                state: 'OR',
+            },
+        };
+
+        it('different body → 422 IDEMPOTENCY_KEY_REUSED, nothing new queued, original replay intact', async () => {
+            const key = 'integration-key-reuse-body';
+            const first = await request(baseURL).post('/api/v1/coffee-shops').set('Idempotency-Key', key).send(original);
+            expect(first.status).toBe(202);
+
+            const tampered = await request(baseURL)
+                .post('/api/v1/coffee-shops')
+                .set('Idempotency-Key', key)
+                .send({ shop: { ...original.shop, displayName: { text: 'Reuse Tampered' } } });
+            expect(tampered.status).toBe(422);
+            expect(tampered.body.error.code).toBe('IDEMPOTENCY_KEY_REUSED');
+            expect(tampered.headers['idempotent-replay']).toBeUndefined();
+            expect(await countSubmissions(db, 'Reuse Tampered')).toBe(0);
+
+            const replay = await request(baseURL).post('/api/v1/coffee-shops').set('Idempotency-Key', key).send(original);
+            expect(replay.status).toBe(202);
+            expect(replay.body).toEqual(first.body);
+            expect(await countSubmissions(db, 'Reuse Original')).toBe(1);
+        });
+
+        it('same key on a different endpoint → 422, not a replay of the POST response', async () => {
+            const key = 'integration-key-reuse-endpoint';
+            const [seeded] = await queryAll(db, "INSERT INTO coffee_shops (name, address, state) VALUES ('Seed', '1 Seed St', 'OR') RETURNING id");
+            try {
+                expect((await request(baseURL).post('/api/v1/coffee-shops').set('Idempotency-Key', key).send(original)).status).toBe(202);
+                const put = await request(baseURL).put(`/api/v1/coffee-shops/${seeded.id}`).set('Idempotency-Key', key).send(original);
+                expect(put.status).toBe(422);
+                expect(await queryAll(db, "SELECT id FROM shop_submissions WHERE kind = 'update'")).toHaveLength(0);
+            } finally {
+                await queryAll(db, 'DELETE FROM coffee_shops WHERE id = ?', [seeded.id]);
+            }
+        });
+
+        it('malformed key → 400 IDEMPOTENCY_KEY_INVALID and nothing stored', async () => {
+            const res = await request(baseURL).post('/api/v1/coffee-shops').set('Idempotency-Key', 'bad key!').send(original);
+            expect(res.status).toBe(400);
+            expect(res.body.error.code).toBe('IDEMPOTENCY_KEY_INVALID');
+            expect(await queryAll(db, "SELECT key FROM idempotency_keys WHERE key = 'bad key!'")).toHaveLength(0);
+        });
+    });
+
+    it('concurrent requests with the same key: at most one submission; the loser sees 409 or replay', async () => {
         const key = 'integration-key-concurrent';
         const payload = {
             shop: {
@@ -164,23 +208,21 @@ describe('Idempotency — POST /api/v1/coffee-shops', () => {
             },
         };
 
-        const before = await queryAll(db, 'SELECT id FROM coffee_shops WHERE name = ?', ['Concurrent Shop']);
-        const startCount = before.length;
+        const startCount = await countSubmissions(db, 'Concurrent Shop');
 
         const [a, b] = await Promise.all([
             request(baseURL).post('/api/v1/coffee-shops').set('Idempotency-Key', key).send(payload),
             request(baseURL).post('/api/v1/coffee-shops').set('Idempotency-Key', key).send(payload),
         ]);
 
-        // Exactly one new DB insert.
-        const after = await queryAll(db, 'SELECT id FROM coffee_shops WHERE name = ?', ['Concurrent Shop']);
-        expect(after.length).toBe(startCount + 1);
+        // Exactly one new queued submission.
+        expect(await countSubmissions(db, 'Concurrent Shop')).toBe(startCount + 1);
 
-        // Acceptable outcomes per request: success (200), in-flight (409), or replay (200 + Idempotent-Replay).
+        // Acceptable outcomes per request: accepted (202), in-flight (409), or replay (202 + Idempotent-Replay).
         for (const res of [a, b]) {
-            expect([200, 409]).toContain(res.status);
+            expect([202, 409]).toContain(res.status);
         }
-        // At least one must be a successful 200 (the winner).
-        expect([a.status, b.status]).toContain(200);
+        // At least one must be the accepted winner.
+        expect([a.status, b.status]).toContain(202);
     });
 });

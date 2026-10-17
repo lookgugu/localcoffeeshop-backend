@@ -1,119 +1,107 @@
 /**
- * Coffee Shops Write Routes
+ * Coffee Shops Write Routes — community proposals
  *
- * POST /coffee-shops        — create a new shop
- * PUT  /coffee-shops/:id    — update an existing shop
+ * POST /coffee-shops        — propose a new shop
+ * PUT  /coffee-shops/:id    — propose a change to an existing shop
  *
- * Both endpoints sit behind `withIdempotency`, so a retried request that
- * carries the same `Idempotency-Key` header replays the original response
- * rather than inserting/updating again.
+ * Neither route modifies the published `coffee_shops` table. A valid request
+ * is queued in `shop_submissions` as 'pending' and answered with
+ * 202 Accepted + `status: 'pending_review'`. There is deliberately no public
+ * (or private) publication/moderation endpoint yet.
+ *
+ * Every write under /api has already passed the shared write rate limiter
+ * (src/lib/middleware.js). Per-route order is load-bearing:
+ *   0. kill switch     — SUBMISSIONS_ENABLED=false → 503 before any work.
+ *   1. validate        — pure; a malformed request is rejected with 400
+ *                        before it can reserve an idempotency key or touch
+ *                        the queue.
+ *   2. withIdempotency — dedupes retries of the same logical submission.
+ *   3. handler         — existence check (PUT) + capacity-bounded insert.
  *
  * Body shape mirrors what the frontend `public/submit.js` sends:
  *   { shop: { displayName: { text }, formattedAddress, state,
- *             priceLevel, phoneNumber?, website?, description? } }
- *
- * (Only the fields the `coffee_shops` table actually persists are written —
- * the schema today is name/address/price_level/state/language_code/source_file.
- * The extra fields are accepted but currently ignored, matching the existing
- * table.)
+ *             priceLevel?, phoneNumber?, website?, description? } }
  */
 
 const { asyncHandler } = require('../lib/async-handler');
-const { sendSuccess } = require('../lib/responses');
 const { withIdempotency } = require('../lib/idempotency');
-const { ValidationError } = require('../usecases/errors');
+const { UnavailableError } = require('../usecases/errors');
+const {
+    parseShopId,
+    validateShopProposal,
+    makeSubmitShopProposalUseCase,
+} = require('../usecases/submissions');
 
-function extractShop(body, enums) {
-    if (!body || typeof body !== 'object') {
-        throw new ValidationError('Request body must be a JSON object');
-    }
-    const shop = body.shop;
-    if (!shop || typeof shop !== 'object') {
-        throw new ValidationError('Request body must contain a "shop" object');
-    }
-    const name = shop.displayName?.text;
-    const address = shop.formattedAddress;
-    const state = shop.state;
-    const priceLevel = shop.priceLevel || null;
-    const languageCode = shop.displayName?.languageCode || 'en';
-
-    if (!name || typeof name !== 'string' || !name.trim()) {
-        throw new ValidationError('shop.displayName.text is required');
-    }
-    if (!address || typeof address !== 'string' || !address.trim()) {
-        throw new ValidationError('shop.formattedAddress is required');
-    }
-    // Validate against the canonical State enum, not just the shape — 'XX'
-    // would otherwise pass the regex and reach the DB.
-    if (!state || typeof state !== 'string' || !enums.isStateCode(state)) {
-        throw new ValidationError('shop.state is required and must be a valid US state code');
-    }
-
-    return {
-        name: name.trim(),
-        address: address.trim(),
-        state: state.toUpperCase(),
-        priceLevel,
-        languageCode,
+// Operator kill switch (SUBMISSIONS_ENABLED=false): refuse before any work.
+function requireSubmissionsEnabled(config) {
+    return (req, res, next) => {
+        if (config.submissionsEnabled) return next();
+        return next(new UnavailableError(
+            'SUBMISSIONS_DISABLED',
+            'Community submissions are temporarily closed. Please try again later.',
+        ));
     };
 }
 
+function validate(kind, enums) {
+    return (req, res, next) => {
+        try {
+            req.submission = {
+                kind,
+                targetShopId: kind === 'update' ? parseShopId(req.params.id) : null,
+                proposal: validateShopProposal(req.body, enums),
+            };
+            next();
+        } catch (err) {
+            next(err);
+        }
+    };
+}
+
+function sendAccepted(res, { submissionId }, { kind, targetShopId, proposal }) {
+    res.set('Cache-Control', 'no-store');
+    res.status(202).json({
+        success: true,
+        data: {
+            submissionId,
+            status: 'pending_review',
+            kind,
+            targetShopId,
+            message: 'Thanks! Your submission was received and is pending review.',
+            displayName: { text: proposal.name, languageCode: proposal.languageCode },
+            formattedAddress: proposal.address,
+            state: proposal.state,
+            priceLevel: proposal.priceLevel,
+        },
+    });
+}
+
 function mountCoffeeShops(router, deps) {
-    const { db, logger, enums } = deps;
+    const { db, logger, enums, config } = deps;
     const idempotent = withIdempotency({ db, logger });
+    const submitShopProposal = makeSubmitShopProposalUseCase({
+        db,
+        queueMax: config.submissionQueueMax,
+    });
 
-    router.post(
-        '/coffee-shops',
-        idempotent,
-        asyncHandler(async (req, res) => {
-            const shop = extractShop(req.body, enums);
-            const { lastID } = await db.run(
-                `INSERT INTO coffee_shops (name, address, price_level, language_code, state, source_file)
-                 VALUES (?, ?, ?, ?, ?, ?)`,
-                [shop.name, shop.address, shop.priceLevel, shop.languageCode, shop.state, 'api_submission'],
-                'insert_coffee_shop',
-            );
+    const handle = asyncHandler(async (req, res) => {
+        const result = await submitShopProposal(req.submission);
+        (req.log || logger).info(
+            {
+                event: 'shop_submission_queued',
+                submissionId: result.submissionId,
+                kind: req.submission.kind,
+                targetShopId: req.submission.targetShopId,
+            },
+            'Community submission queued for review',
+        );
+        return sendAccepted(res, result, req.submission);
+    });
 
-            return sendSuccess(res, {
-                id: lastID,
-                displayName: { text: shop.name, languageCode: shop.languageCode },
-                formattedAddress: shop.address,
-                state: shop.state,
-                priceLevel: shop.priceLevel,
-            });
-        }),
-    );
+    const open = requireSubmissionsEnabled(config);
 
-    router.put(
-        '/coffee-shops/:id',
-        idempotent,
-        asyncHandler(async (req, res) => {
-            const id = parseInt(req.params.id, 10);
-            if (!Number.isInteger(id) || id <= 0) {
-                throw new ValidationError('Invalid shop id');
-            }
-            const shop = extractShop(req.body, enums);
-            const { changes } = await db.run(
-                `UPDATE coffee_shops
-                 SET name = ?, address = ?, price_level = ?, language_code = ?, state = ?
-                 WHERE id = ?`,
-                [shop.name, shop.address, shop.priceLevel, shop.languageCode, shop.state, id],
-                'update_coffee_shop',
-            );
-
-            if (changes === 0) {
-                throw new ValidationError(`Coffee shop with id ${id} not found`);
-            }
-
-            return sendSuccess(res, {
-                id,
-                displayName: { text: shop.name, languageCode: shop.languageCode },
-                formattedAddress: shop.address,
-                state: shop.state,
-                priceLevel: shop.priceLevel,
-            });
-        }),
-    );
+    router.post('/coffee-shops', open, validate('create', enums), idempotent, handle);
+    router.put('/coffee-shops/:id', open, validate('update', enums), idempotent, handle);
 }
 
 module.exports = { mountCoffeeShops };

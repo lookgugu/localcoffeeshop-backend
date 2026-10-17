@@ -121,7 +121,8 @@ sqlite3 data/coffee_shops.db
 
 ## Security
 
-- **Rate Limiting**: 100 requests per 15 minutes per IP
+- **Rate Limiting**: 100 requests per 15 minutes per IP; writes additionally 10 per hour per IP
+- **Community submissions**: `POST`/`PUT /coffee-shops` queue proposals for review (202) and never modify published data; closed in production unless `SUBMISSIONS_ENABLED=true` — see `docs/security/community-submissions.md`
 - **CORS**: Configurable allowed origins
 - **CSP**: Content Security Policy headers
 - **Input Validation**: Parameterized queries, sanitized inputs

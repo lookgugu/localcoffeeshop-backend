@@ -23,12 +23,14 @@
  * @param {*} [details] Optional details (only included outside production)
  * @param {Object} [opts]
  * @param {string} [opts.nodeEnv] Defaults to process.env.NODE_ENV
+ * @param {string} [opts.code] Stable machine-readable error code
  */
 function sendError(res, statusCode, message, details = null, opts = {}) {
     const nodeEnv = opts.nodeEnv || process.env.NODE_ENV;
     const response = {
         success: false,
         error: {
+            ...(opts.code ? { code: opts.code } : {}),
             message,
             statusCode,
             timestamp: new Date().toISOString(),

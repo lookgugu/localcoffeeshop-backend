@@ -13,12 +13,20 @@ const packageJson = require('../package.json');
 const { mountMiddleware } = require('./lib/middleware');
 const { makeCachedRoute } = require('./lib/cached-route');
 const { sendError, sendSuccess } = require('./lib/responses');
-const { ValidationError } = require('./usecases/errors');
+const { ValidationError, UnavailableError } = require('./usecases/errors');
 const { makeSearchShopsUseCase } = require('./usecases/searchShops');
 const { makeNearbyShopsUseCase } = require('./usecases/nearbyShops');
 const { mountMetricsRoute } = require('./routes/metrics');
 const { mountApiV1 } = require('./routes/api-v1');
 const { mountSeo } = require('./routes/seo');
+
+// body-parser `err.type` → client-facing message. Anything else stays a 500.
+const BODY_PARSER_ERRORS = Object.freeze({
+    'entity.parse.failed': 'Request body is not valid JSON',
+    'entity.too.large': 'Request body is too large',
+    'encoding.unsupported': 'Unsupported request body encoding',
+    'charset.unsupported': 'Unsupported request body charset',
+});
 
 /**
  * Build the Express app from injected dependencies.
@@ -76,11 +84,20 @@ function buildApp({ config, db, cache, logger, metrics, enums }) {
         res.status(404).sendFile(path.join(__dirname, 'public', 'html', '404.html'));
     });
 
-    // Global error handler — MUST be last. Maps ValidationError to 400.
+    // Global error handler — MUST be last. Maps ValidationError to 400,
+    // UnavailableError to 503 + Retry-After, and body-parser client errors
+    // (malformed JSON, oversized body) to their own 4xx instead of 500.
     // eslint-disable-next-line no-unused-vars
     app.use((err, req, res, next) => {
         if (err instanceof ValidationError) {
             return sendError(res, 400, err.message);
+        }
+        if (err instanceof UnavailableError) {
+            res.set('Retry-After', String(err.retryAfterSeconds));
+            return sendError(res, 503, err.message, null, { code: err.code });
+        }
+        if (BODY_PARSER_ERRORS[err.type] && err.status >= 400 && err.status < 500) {
+            return sendError(res, err.status, BODY_PARSER_ERRORS[err.type]);
         }
         logger.error({ err, url: req.url, method: req.method }, 'Unhandled server error');
         sendError(res, 500, 'Internal server error', err.message, { nodeEnv: config.nodeEnv });

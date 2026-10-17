@@ -5,6 +5,10 @@
  * an at-most-once guarantee — even under concurrent retries.
  *
  *   - No header → next() immediately. The middleware is opt-in per request.
+ *   - Header too long or outside [A-Za-z0-9._:-] → 400 before any storage.
+ *   - Header present, row in cache whose request fingerprint (method, route,
+ *     params, body) differs from this request — or is NULL (legacy row) —
+ *     → 422 IDEMPOTENCY_KEY_REUSED; neither replayed nor executed.
  *   - Header present, completed row in cache (within TTL) → replay the
  *     stored {status_code, response} body, set `Idempotent-Replay: true`,
  *     and skip the handler.
@@ -30,9 +34,30 @@
  * The middleware is transparent to handlers — they don't know it exists.
  */
 
+const crypto = require('crypto');
+
 const TTL_SECONDS_DEFAULT = 86400; // 24h
 const SWEEP_PROBABILITY = 0.01; // 1% chance per completed write
 const MAX_KEY_LENGTH = 128; // reject oversized keys before reserving storage
+// UUIDs and other opaque tokens; no whitespace, quotes or non-ASCII.
+const KEY_PATTERN = /^[A-Za-z0-9._:-]+$/;
+
+/**
+ * SHA-256 over what makes two requests "the same" for replay purposes:
+ * method, matched route pattern, route params and parsed body. Keyed on the
+ * route pattern rather than the raw URL so case/trailing-slash variants of
+ * one endpoint still match.
+ *
+ * @param {import('express').Request} req
+ * @returns {string} hex digest
+ */
+function requestFingerprint(req) {
+    const route = req.route ? req.route.path : req.path;
+    return crypto
+        .createHash('sha256')
+        .update(JSON.stringify([req.method, route, req.params || {}, req.body ?? null]))
+        .digest('hex');
+}
 
 function withIdempotency({ db, ttlSeconds = TTL_SECONDS_DEFAULT, logger }) {
     return async function idempotencyMiddleware(req, res, next) {
@@ -54,15 +79,33 @@ function withIdempotency({ db, ttlSeconds = TTL_SECONDS_DEFAULT, logger }) {
                 },
             });
         }
+        if (!KEY_PATTERN.test(key)) {
+            return res.status(400).json({
+                success: false,
+                error: {
+                    code: 'IDEMPOTENCY_KEY_INVALID',
+                    message: 'Idempotency-Key may contain only letters, digits and . _ : -',
+                },
+            });
+        }
+
+        const fingerprint = requestFingerprint(req);
 
         try {
             const minCreated = Math.floor(Date.now() / 1000) - ttlSeconds;
             const existing = await db.get(
-                'SELECT status_code, response, status FROM idempotency_keys WHERE key = ? AND created_at > ?',
+                'SELECT status_code, response, status, request_hash FROM idempotency_keys WHERE key = ? AND created_at > ?',
                 [key, minCreated],
                 'idempotency_lookup',
             );
 
+            // Same key, different request: never replay an unrelated
+            // response and never run the handler. A NULL fingerprint is a
+            // legacy row (pre-moderation direct write) whose request cannot
+            // be proven equal — fail closed rather than replay it.
+            if (existing && existing.request_hash !== fingerprint) {
+                return _respondKeyReused(res);
+            }
             if (existing && existing.status === 'completed') {
                 res.set('Idempotent-Replay', 'true');
                 return res.status(existing.status_code).type('json').send(existing.response);
@@ -78,9 +121,9 @@ function withIdempotency({ db, ttlSeconds = TTL_SECONDS_DEFAULT, logger }) {
             const now = Math.floor(Date.now() / 1000);
             const reservation = await db.run(
                 `INSERT OR IGNORE INTO idempotency_keys
-                    (key, endpoint, status_code, response, created_at, status)
-                 VALUES (?, ?, 0, '', ?, 'pending')`,
-                [key, endpoint, now],
+                    (key, endpoint, status_code, response, created_at, status, request_hash)
+                 VALUES (?, ?, 0, '', ?, 'pending', ?)`,
+                [key, endpoint, now, fingerprint],
                 'idempotency_reserve',
             );
 
@@ -159,6 +202,22 @@ function _respondInProgress(res) {
 }
 
 /**
+ * 422 envelope when a key is reused for a different request
+ * (draft-ietf-httpapi-idempotency-key-header).
+ *
+ * @private
+ */
+function _respondKeyReused(res) {
+    return res.status(422).json({
+        success: false,
+        error: {
+            code: 'IDEMPOTENCY_KEY_REUSED',
+            message: 'This Idempotency-Key was already used for a different request',
+        },
+    });
+}
+
+/**
  * Lazy probabilistic sweep — runs on ~1% of completed writes. Cheap,
  * eventually consistent. Failures are swallowed (housekeeping is best-effort).
  *
@@ -181,4 +240,4 @@ async function _maybeSweep(db, ttlSeconds, logger) {
     }
 }
 
-module.exports = { withIdempotency, TTL_SECONDS_DEFAULT };
+module.exports = { withIdempotency, requestFingerprint, TTL_SECONDS_DEFAULT };

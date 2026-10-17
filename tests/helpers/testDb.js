@@ -5,7 +5,41 @@
  * for testing. Matches production schema exactly including FTS5 indexes.
  */
 
+const fs = require('fs');
+const path = require('path');
 const sqlite3 = require('sqlite3').verbose();
+
+const MIGRATIONS_DIR = path.join(__dirname, '..', '..', 'migrations');
+
+// The hand-written schema below mirrors every migration up to and including
+// 20260609_add_coordinates. Migrations named after this cut-off are applied
+// from the real files so the tests exercise the shipped DDL and cannot drift.
+const HAND_WRITTEN_SCHEMA_CUTOFF = '20260609_add_coordinates.sql';
+
+/**
+ * Return the `-- migration:up` section of a migration file.
+ * Mirrors the parsing in scripts/migrate.js.
+ * @param {string} filename
+ * @returns {string}
+ */
+function readMigrationUp(filename) {
+  const content = fs.readFileSync(path.join(MIGRATIONS_DIR, filename), 'utf8');
+  const parts = content.split(/-- migration:(up|down)/i);
+  const upIndex = parts.findIndex((p) => p.trim().toLowerCase() === 'up');
+  return upIndex >= 0 ? parts[upIndex + 1] : content;
+}
+
+function migrationsAfterCutoff() {
+  return fs.readdirSync(MIGRATIONS_DIR)
+    .filter((f) => f.endsWith('.sql') && f > HAND_WRITTEN_SCHEMA_CUTOFF)
+    .sort();
+}
+
+function execAsync(db, sql) {
+  return new Promise((resolve, reject) => {
+    db.exec(sql, (err) => (err ? reject(err) : resolve()));
+  });
+}
 
 /**
  * Create a test database with the production schema
@@ -106,11 +140,18 @@ function createTestDatabase() {
             status      TEXT NOT NULL DEFAULT 'completed'
           )
         `);
-        db.run('CREATE INDEX idx_idempotency_created_at ON idempotency_keys(created_at)', (err) => {
+        db.run('CREATE INDEX idx_idempotency_created_at ON idempotency_keys(created_at)', async (err) => {
           if (err) {
             reject(err);
-          } else {
+            return;
+          }
+          try {
+            for (const file of migrationsAfterCutoff()) {
+              await execAsync(db, readMigrationUp(file));
+            }
             resolve(db);
+          } catch (migrationErr) {
+            reject(migrationErr);
           }
         });
       });

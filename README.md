@@ -65,6 +65,7 @@ Server runs at `http://localhost:3000`
 - `GET /search` - Search shops with filters (query, state, price)
 - `GET /nearby` - Search coordinate-bearing shops near `lat`/`lon` (or `lng`)
 - `GET /stats` - Database statistics
+- `POST /waitlist/subscribe`, `POST /waitlist/confirm`, `POST /waitlist/unsubscribe` - roaster-subscription interest list (double opt-in via Resend; closed with 503 unless configured; see `docs/waitlist.md`)
 
 ### Example Requests
 

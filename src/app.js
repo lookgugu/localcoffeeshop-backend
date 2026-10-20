@@ -19,6 +19,8 @@ const { makeNearbyShopsUseCase } = require('./usecases/nearbyShops');
 const { mountMetricsRoute } = require('./routes/metrics');
 const { mountApiV1 } = require('./routes/api-v1');
 const { mountSeo } = require('./routes/seo');
+const { makeWaitlistService } = require('./waitlist/service');
+const { makeResendProvider } = require('./waitlist/resend-provider');
 
 // body-parser `err.type` → client-facing message. Anything else stays a 500.
 const BODY_PARSER_ERRORS = Object.freeze({
@@ -38,9 +40,12 @@ const BODY_PARSER_ERRORS = Object.freeze({
  * @param {Object} deps.logger Pino-shaped logger
  * @param {Object} deps.metrics Built metrics object from buildMetrics
  * @param {Object} deps.enums Enums module (State, Price)
+ * @param {Function} [deps.waitlistFetch] fetch used for the waitlist email
+ *   provider (tests inject a fake; defaults to global fetch)
+ * @param {Function} [deps.waitlistSleep] retry backoff sleep (tests)
  * @returns {import('express').Application}
  */
-function buildApp({ config, db, cache, logger, metrics, enums }) {
+function buildApp({ config, db, cache, logger, metrics, enums, waitlistFetch, waitlistSleep }) {
     const app = express();
 
     if (config.nodeEnv === 'production') {
@@ -63,11 +68,30 @@ function buildApp({ config, db, cache, logger, metrics, enums }) {
     const searchShopsUseCase = makeSearchShopsUseCase({ db });
     const nearbyShopsUseCase = makeNearbyShopsUseCase({ db });
 
+    // Waitlist: no provider client exists unless the dedicated config is
+    // complete, so a disabled/misconfigured waitlist cannot reach Resend.
+    const wl = config.waitlist;
+    const waitlistService = makeWaitlistService({
+        waitlist: wl,
+        provider: wl && wl.enabled ? makeResendProvider({
+            apiKey: wl.apiKey,
+            segmentId: wl.segmentId,
+            segmentName: wl.segmentName,
+            suppressionSegmentId: wl.suppressionSegmentId,
+            suppressionSegmentName: wl.suppressionSegmentName,
+            timeoutMs: wl.providerTimeoutMs,
+            ...(waitlistFetch ? { fetchImpl: waitlistFetch } : {}),
+            ...(waitlistSleep ? { sleep: waitlistSleep } : {}),
+        }) : null,
+        logger,
+    });
+
     mountApiV1(app, {
         db,
         cached,
         searchShopsUseCase,
         nearbyShopsUseCase,
+        waitlistService,
         config,
         logger,
         enums,

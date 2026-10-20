@@ -28,9 +28,10 @@ function silentLogger() {
  * @param {import('sqlite3').Database} [testDb] Optional test database
  * @param {Object} [opts]
  * @param {Object} [opts.env] Env overrides merged over process.env for loadConfig
+ * @param {Object} [opts.deps] Extra buildApp deps (e.g. waitlistFetch, a fake provider HTTP client)
  * @returns {Promise<{server: import('http').Server, url: string, port: number, app: import('express').Application}>}
  */
-async function startTestServer(testDb = null, { env = {} } = {}) {
+async function startTestServer(testDb = null, { env = {}, deps = {} } = {}) {
   const logger = silentLogger();
   const metrics = buildMetrics();
   const cache = new QueryCache({ maxEntries: 10000 });
@@ -62,7 +63,7 @@ async function startTestServer(testDb = null, { env = {} } = {}) {
     });
   }
 
-  const app = buildApp({ config, db, cache, logger, metrics, enums });
+  const app = buildApp({ config, db, cache, logger, metrics, enums, ...deps });
 
   return new Promise((resolve, reject) => {
     server = app.listen(0, (err) => {

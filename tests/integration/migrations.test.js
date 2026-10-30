@@ -15,7 +15,12 @@ const sqlite3 = require('sqlite3');
 
 const ROOT = path.join(__dirname, '..', '..');
 const TRACKED_DB = path.join(ROOT, 'data', 'coffee_shops.db');
-const NEW_MIGRATIONS = ['20261017_01_create_shop_submissions.sql', '20261017_02_idempotency_request_hash.sql'];
+const CLEANUP_MIGRATION = '20261030_remove_non_coffee_listings.sql';
+const NEW_MIGRATIONS = ['20261017_01_create_shop_submissions.sql', '20261017_02_idempotency_request_hash.sql', CLEANUP_MIGRATION];
+// Listings CLEANUP_MIGRATION removes (not coffee shops). Every other published row must survive.
+const REMOVED_LISTINGS = [
+    { id: 27841, name: 'Woods Hill Table', address: '24 Commonwealth Ave, Concord, MA 01742, USA' },
+];
 
 function sha256File(file) {
     return crypto.createHash('sha256').update(fs.readFileSync(file)).digest('hex');
@@ -61,11 +66,21 @@ async function appliedMigrations(dbPath) {
     return withDb(dbPath, async (db) => (await all(db, 'SELECT name FROM migrations ORDER BY name')).map((r) => r.name));
 }
 
+async function publishedRows(dbPath) {
+    return withDb(dbPath, (db) => all(db, 'SELECT id, name, address, price_level, language_code, source_file, created_at, state FROM coffee_shops ORDER BY id'));
+}
+
+function digest(rows) {
+    return { count: rows.length, hash: crypto.createHash('sha256').update(JSON.stringify(rows)).digest('hex') };
+}
+
 async function publishedDigest(dbPath) {
-    return withDb(dbPath, async (db) => {
-        const rows = await all(db, 'SELECT id, name, address, price_level, language_code, source_file, created_at, state FROM coffee_shops ORDER BY id');
-        return { count: rows.length, hash: crypto.createHash('sha256').update(JSON.stringify(rows)).digest('hex') };
-    });
+    return digest(await publishedRows(dbPath));
+}
+
+/** Test setup only: forget the migrations named after `name`, as if `name` were the latest applied. */
+async function asIfLatest(dbPath, name) {
+    await withDb(dbPath, (db) => all(db, 'DELETE FROM migrations WHERE name > ?', [name]));
 }
 
 describe('Migrations (scripts/migrate.js)', () => {
@@ -107,12 +122,18 @@ describe('Migrations (scripts/migrate.js)', () => {
         expect(await columns(dbPath, 'idempotency_keys')).toContain('request_hash');
     });
 
-    it('existing database (copy of data/coffee_shops.db): additive only, published rows unchanged, reapply is a no-op', async () => {
+    it('existing database (copy of data/coffee_shops.db): only the listed non-coffee listings removed, reapply is a no-op', async () => {
         const dbPath = path.join(tmp, 'existing.db');
         fs.copyFileSync(TRACKED_DB, dbPath);
-        const before = await publishedDigest(dbPath);
+        const rowsBefore = await publishedRows(dbPath);
         const appliedBefore = await appliedMigrations(dbPath);
         expect(appliedBefore).not.toEqual(expect.arrayContaining(NEW_MIGRATIONS));
+        // Each listing to remove is in the tracked DB exactly as matched.
+        for (const listing of REMOVED_LISTINGS) {
+            expect(rowsBefore.find((r) => r.id === listing.id)).toEqual(expect.objectContaining(listing));
+        }
+        const removedIds = new Set(REMOVED_LISTINGS.map((l) => l.id));
+        const before = digest(rowsBefore.filter((r) => !removedIds.has(r.id)));
 
         migrate(dbPath, 'up');
 
@@ -177,9 +198,10 @@ describe('Migrations (scripts/migrate.js)', () => {
             return `${failure.stdout}${failure.stderr}`;
         }
 
-        it('20261017_02 (latest): down refused; request_hash values, queue rows and ledger intact; up is a no-op', async () => {
+        it('20261017_02 (latest applied): down refused; request_hash values, queue rows and ledger intact; up then applies only what follows', async () => {
             const dbPath = path.join(tmp, 'retain-02.db');
             fs.copyFileSync(path.join(tmp, 'existing.db'), dbPath);
+            await asIfLatest(dbPath, '20261017_02_idempotency_request_hash.sql');
             await seedRetainedData(dbPath, { withFingerprint: true });
             const before = await snapshot(dbPath);
 
@@ -187,17 +209,20 @@ describe('Migrations (scripts/migrate.js)', () => {
             expect(await snapshot(dbPath)).toEqual(before);
             expect(before.keys.find((k) => k.key === 'retained-key').request_hash).toBe(FINGERPRINT);
 
+            // Only the later cleanup migration is pending; reapplying it removes nothing more.
+            migrate(dbPath, 'up');
+            const after = await snapshot(dbPath);
+            expect(after.ledger.map((r) => r.name)).toEqual([...before.ledger.map((r) => r.name), CLEANUP_MIGRATION].sort());
+            expect({ ...after, ledger: before.ledger }).toEqual(before);
             expect(migrate(dbPath, 'up')).toMatch(/No pending migrations/);
-            expect(await snapshot(dbPath)).toEqual(before);
         });
 
-        it('20261017_01 (latest applied): down refused; queued proposals and ledger intact; up then applies only 02', async () => {
+        it('20261017_01 (latest applied): down refused; queued proposals and ledger intact; up then applies only what follows', async () => {
             const dbPath = path.join(tmp, 'retain-01.db');
             fs.copyFileSync(path.join(tmp, 'existing.db'), dbPath);
             // Test setup only: put this throw-away copy in the state "01 applied, 02 not yet".
-            await withDb(dbPath, (db) => exec(db, `
-                DELETE FROM migrations WHERE name = '20261017_02_idempotency_request_hash.sql';
-                ALTER TABLE idempotency_keys DROP COLUMN request_hash;`));
+            await asIfLatest(dbPath, '20261017_01_create_shop_submissions.sql');
+            await withDb(dbPath, (db) => exec(db, 'ALTER TABLE idempotency_keys DROP COLUMN request_hash;'));
             await seedRetainedData(dbPath, { withFingerprint: false });
             const before = await snapshot(dbPath);
             expect(before.ledger.map((r) => r.name)).toContain('20261017_01_create_shop_submissions.sql');
@@ -207,7 +232,7 @@ describe('Migrations (scripts/migrate.js)', () => {
 
             migrate(dbPath, 'up');
             const after = await snapshot(dbPath);
-            expect(after.ledger.map((r) => r.name)).toEqual([...before.ledger.map((r) => r.name), '20261017_02_idempotency_request_hash.sql'].sort());
+            expect(after.ledger.map((r) => r.name)).toEqual([...before.ledger.map((r) => r.name), '20261017_02_idempotency_request_hash.sql', CLEANUP_MIGRATION].sort());
             expect(after.submissions).toEqual(before.submissions);
             expect(await columns(dbPath, 'idempotency_keys')).toContain('request_hash');
             expect(migrate(dbPath, 'up')).toMatch(/No pending migrations/);

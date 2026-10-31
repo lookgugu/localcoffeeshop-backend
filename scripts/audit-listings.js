@@ -22,6 +22,10 @@
 
 const sqlite3 = require('sqlite3');
 
+// Stems that mean coffee anywhere in a word ("Coffeebar", "Coffees", "KentJava").
+const COFFEE_STEM = /(coffee|caffe|kaffee|espresso|java)/i;
+// "tea" only at a word start ("Tearoom", "Teapioca", but not "Steakhouse").
+const TEA = /\b(tea\w*|milk ?tea|beanery|jitters)\b/i;
 const COFFEE = /\b(coffee|cof+e+|cafe?s?|cafecito|caffeine|nitro|caffe|kaffe|kaff?ie?ne|kof+ee|kafe|kofi|espresso|roast(er|ers|ery|ing|ed)?|beans?|brew(s|ed|house|haus)?|latte|java|joe|mocha|cappuccino|perk|grind|cup|mug|drip|pour|barista|kopi|tea(house)?|boba|starbucks|dunkin|peet'?s|tim hortons|caribou|dutch bros|scooter'?s|biggby|black rifle|blue bottle|philz|la colombe|intelligentsia|stumptown|gregorys|pavement|ziggi'?s|7 brew|pj'?s|human bean|black rock|aroma joe|crema|coffeehouse|coffeeshop)\b/i;
 const AMBIGUOUS = /\b(bakery|bakeries|bake shop|bakehouse|bakers?|donuts?|doughnuts?|bagels?|krispy kreme|panera|books?|bookstore|booksellers?|museum|library|university|college|school|hospital|church|theat(er|re)|cinema|brewing)\b/i;
 const BEER_BREWING = /\b(brewing (co|company)|brewery|brewpub|beer)\b/i;
@@ -43,7 +47,7 @@ function normalize(name) {
 /** The categories that say `name` is not a coffee shop, or null to keep it. */
 function classify(name) {
     const n = normalize(name);
-    if (COFFEE.test(n)) return null;
+    if (COFFEE.test(n) || COFFEE_STEM.test(n) || TEA.test(n)) return null;
     if (AMBIGUOUS.test(n) && !BEER_BREWING.test(n)) return null;
     const hits = NOT_COFFEE.filter(([, re]) => re.test(n)).map(([category]) => category);
     return hits.length ? hits : null;

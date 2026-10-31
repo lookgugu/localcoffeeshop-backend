@@ -4,7 +4,7 @@
 -- The directory was seeded from place searches that also returned
 -- restaurants, bars, breweries, hotels, markets, gas stations and fast-food
 -- chains that happen to serve coffee (reported: Woods Hill Table, a
--- restaurant/bar at 24 Commonwealth Ave, Concord, MA). This removes 1,810 of
+-- restaurant/bar at 24 Commonwealth Ave, Concord, MA). This removes 1,794 of
 -- them, each matched on id AND name AND address so it can never remove a
 -- different shop. Runs after 20261030_01, so each id is the copy it kept.
 --
@@ -60,7 +60,6 @@ WHERE (id, name, address) IN (VALUES
     (1237, 'Simply Southern Eatery', '41 W McIver Ave, Macclenny, FL 32063, USA'), -- restaurant
     (1263, 'Southern Craft Creamery', '2884 Jefferson St, Marianna, FL 32446, USA'), -- juice/dessert
     (1278, 'Sprinkles Ice Cream Shop', '26 Hwy 40 E, Inglis, FL 34449, USA'), -- juice/dessert
-    (1316, 'Steamworks Coffeebar and Eatery', '8705 S U.S. Hwy 1, Port St. Lucie, FL 34952, USA'), -- restaurant
     (1404, 'The Calhoun Roadside Motor Lodge', '20228 W Central Ave, Blountstown, FL 32424, USA'), -- lodging/venue
     (1406, 'The Chill Room Kava Bar of Lake Worth - Original Location', '7392 Lake Worth Rd, Lake Worth Corridor, FL 33467, USA'), -- bar/alcohol
     (1407, 'The Chill Room Kava Bar of Lake Worth Beach', '920 N Dixie Hwy, Lake Worth Beach, FL 33460, USA'), -- bar/alcohol
@@ -89,7 +88,6 @@ WHERE (id, name, address) IN (VALUES
     (1877, 'Hometown Proud Supermarket IGA', '228 W Tatum Ave, McColl, SC 29570, USA'), -- retail/services
     (1878, 'Howard''s Restaurant', '336 E Main St, Moncks Corner, SC 29461, USA'), -- restaurant
     (1886, 'Il Mercato Modern Specialty Market', '15740 SC-11 Suite 1, Salem, SC 29676, USA'), -- retail/services
-    (1895, 'Jitters Brewing Company', '104 Madden Bridge Rd, Central, SC 29630, USA'), -- bar/alcohol
     (1909, 'King''s Famous Pizza Inc', '241 S Richardson St, Latta, SC 29565, USA'), -- food
     (1952, 'Magictyme Wings and Waffles', '705 N Greenwood Ave Ext, Ware Shoals, SC 29692, USA'), -- food
     (1962, 'Mary Lou''s Table', '18 Market, Beaufort, SC 29906, USA'), -- restaurant
@@ -207,7 +205,6 @@ WHERE (id, name, address) IN (VALUES
     (4098, 'Paulding Pancake House & Restaurant', '18187 US-127, Cecil, OH 45821, USA'), -- restaurant
     (4101, 'Pee Dee''s Brunch & Bar', '160 S 4th St, Steubenville, OH 43952, USA'), -- bar/alcohol
     (4118, 'Pirates Cove Pizza & Subs', '126 E Main St, Cardington, OH 43315, USA'), -- food
-    (4160, 'Red Rambler Coffees & Ramblin’ Red’s Brewing Co.', '1493 N Shoop Ave, Wauseon, OH 43567, USA'), -- bar/alcohol
     (4218, 'Sammy''s Family Restaurant - Grand River, OH', '625 River St, Grand River, OH 44045, USA'), -- restaurant
     (4227, 'Schafer Market', '200 S Main St, Fort Loramie, OH 45845, USA'), -- retail/services
     (4386, 'Tatman''s Restaurant', '10586 OH-800, Uhrichsville, OH 44683, USA'), -- restaurant
@@ -552,7 +549,6 @@ WHERE (id, name, address) IN (VALUES
     (11420, 'Wimbledon Community Grocery', '401 Center St, Wimbledon, ND 58492, USA'), -- retail/services
     (11520, 'The Deli Market on Maple Street', '371 Maple St, Danielson, CT 06239, USA'), -- retail/services
     (11538, 'Buttonwood Farm Ice Cream', '473 Shetucket Turnpike, Griswold, CT 06351, USA'), -- juice/dessert
-    (11609, 'Coffees Country Market and Catering', '169 Boston Post Rd, Old Lyme, CT 06371, USA'), -- retail/services
     (11613, 'Cocotte @ James Pharmacy', '323 Main St, Old Saybrook, CT 06475, USA'), -- retail/services
     (11681, 'Heirloom Market at Comstock Ferre', '263 Main St, Wethersfield, CT 06109, USA'), -- retail/services
     (11861, 'Trillium Farm to Table', '62 Canal St, Laconia, NH 03246, USA'), -- restaurant
@@ -788,7 +784,6 @@ WHERE (id, name, address) IN (VALUES
     (15942, 'Gumlog Brewing Company', '5806 West Ave, Lavonia, GA 30553, USA'), -- bar/alcohol
     (15944, 'Hagan Market', '5732 US-280, Claxton, GA 30417, USA'), -- retail/services
     (15949, 'Happy Bear Ice Cream & Treats', '100 Blue Ridge Dr Ste 102, McCaysville, GA 30555, USA'), -- juice/dessert
-    (16033, 'King Kong Milktea & Smoothie Morrow', '1500 Mt Zion Rd #107, Morrow, GA 30260, USA'), -- juice/dessert
     (16047, 'Lavonia Antique Market', '180 Lauren Dr, Lavonia, GA 30553, USA'), -- retail/services
     (16061, 'Linq Breakfast & Brunch Bar', '1943 Mt Zion Rd, Morrow, GA 30260, USA'), -- bar/alcohol
     (16079, 'Magnolia Pharmacy', '4626 Battlefield Pkwy, Ringgold, GA 30736, USA'), -- retail/services
@@ -836,7 +831,6 @@ WHERE (id, name, address) IN (VALUES
     (16946, 'Home Again Restaurant', '815 E Main St, Vevay, IN 47043, USA'), -- restaurant
     (16975, 'Invited To The Table', '118 N Pendleton Ave, Pendleton, IN 46064, USA'), -- restaurant
     (16981, 'J L Hirsch Supermarket', '8 Main St, Poseyville, IN 47633, USA'), -- retail/services
-    (17020, 'KentJava Bar', '110 E Chestnut St, Corydon, IN 47112, USA'), -- bar/alcohol
     (17036, 'Let It Snow Creamery', '618 W Elnora St, Odon, IN 47562, USA'), -- juice/dessert
     (17041, 'Log House Restaurant', '101 N Michigan St, Argos, IN 46501, USA'), -- restaurant
     (17044, 'Lost Hollow Beer Co.', '102 E Franklin St, Greencastle, IN 46135, USA'), -- bar/alcohol
@@ -926,7 +920,6 @@ WHERE (id, name, address) IN (VALUES
     (19065, 'Coach Light Restaurant', '99 E Forrest Ave, Shrewsbury, PA 17361, USA'), -- restaurant
     (19069, 'Coal Oil Johnny''s Eatery', '117 E State St, Pleasantville, PA 16341, USA'), -- restaurant
     (19071, 'Coatesville Community Market Deli', '266 Lincoln Hwy E, Coatesville, PA 19320, USA'), -- retail/services
-    (19077, 'Cocoa Beanery At Hershey Lodge', '325 University Dr, Hershey, PA 17033, USA'), -- lodging/venue
     (19133, 'Conneaut Cellars Winery & Distillery', '12005 Conneaut Lake Rd, Conneaut Lake, PA 16316, USA'), -- bar/alcohol
     (19143, 'Conzatti''s Italian Market', '1250 Scalp Ave a, Johnstown, PA 15904, USA'), -- retail/services
     (19160, 'Country Creamery', '3694 PA-204, Selinsgrove, PA 17870, USA'), -- juice/dessert
@@ -1075,7 +1068,6 @@ WHERE (id, name, address) IN (VALUES
     (20662, 'Sycamore Grille', '92 Main St, Delaware Water Gap, PA 18327, USA'), -- food
     (20665, 'Talula''s Table', '102 W State St, Kennett Square, PA 19348, USA'), -- restaurant
     (20666, 'Tap814 Speakeasy & Supperclub', '800 Scalp Ave, Johnstown, PA 15904, USA'), -- bar/alcohol
-    (20676, 'Teapioca Lounge', '1200 Welsh Rd Suite M, North Wales, PA 19454, USA'), -- bar/alcohol
     (20679, 'Terra Cotta Green Market Co', '236 Mill St, Bristol, PA 19007, USA'), -- retail/services
     (20698, 'The Barn Resort', '75 Cunningham Rd, Gettysburg, PA 17325, USA'), -- lodging/venue
     (20718, 'The Burger Den', '855 Rostraver Rd, Belle Vernon, PA 15012, USA'), -- food
@@ -1187,7 +1179,6 @@ WHERE (id, name, address) IN (VALUES
     (22429, 'Owowcow Creamery', '237 N Union St, Lambertville, NJ 08530, USA'), -- juice/dessert
     (22477, 'Prova Italian American Deli & Grill', '94 Moonachie Ave, Moonachie, NJ 07074, USA'), -- food
     (22479, 'Pure Juice + Kitchen', '9410 2nd Ave, Stone Harbor, NJ 08247, USA'), -- juice/dessert
-    (22540, 'Sally Lunn''s Restaurant & Tearoom', '15 Perry St, Chester, NJ 07930, USA'), -- restaurant
     (22552, 'Scojo''s Eatery', '307 Long Beach Blvd, Surf City, NJ 08008, USA'), -- restaurant
     (22559, 'Shiloh Market', '13 Roadstown Rd, Shiloh, NJ 08353, USA'), -- retail/services
     (22583, 'Spicy''s Bar', '141 Rowan Blvd, Glassboro, NJ 08028, USA'), -- bar/alcohol
@@ -1313,7 +1304,6 @@ WHERE (id, name, address) IN (VALUES
     (25160, 'Whit''s Market', '189 S Main St, Timberville, VA 22853, USA'), -- retail/services
     (25161, 'White Birch | Food + Juice', '170 E Main St, Abingdon, VA 24210, USA'), -- juice/dessert
     (25218, 'Vintage Antiques and Snazzy Things', '301 E Holland Ave, Alpine, TX 79830, USA'), -- retail/services
-    (25285, 'Tin Tulip Tearoom in the Cooper Street Antique Mall', '4905 S Cooper St Suite B, Arlington, TX 76017, USA'), -- retail/services
     (25291, 'Hickman''s Restaurant', '936 Broadway St, Aspermont, TX 79502, USA'), -- restaurant
     (25292, 'Ranchers Restaurant', '220 S Broadway St, Aspermont, TX 79502, USA'), -- restaurant
     (25408, 'Store House Market & Eatery', '813 Main St, Bastrop, TX 78602, USA'), -- restaurant, retail/services
@@ -1346,13 +1336,11 @@ WHERE (id, name, address) IN (VALUES
     (27393, 'Umix Yogurt & Deli', '1004 Padre Blvd suite f-1, South Padre Island, TX 78597, USA'), -- juice/dessert
     (27423, 'Snooze, an A.M. Eatery', '12333 Southwest Fwy Suite 400, Stafford, TX 77477, USA'), -- restaurant
     (27429, 'Hitchin Post Grocery/Deli', '708 4th St, Sterling City, TX 76951, USA'), -- retail/services
-    (27448, 'Teapresso Bar', '3382 Hwy 6, Sugar Land, TX 77478, USA'), -- bar/alcohol
     (27672, 'Carta Valley Market & Soda Shop', '108 S 17th St Ste A, West Columbia, TX 77486, USA'), -- retail/services
     (27681, '9ers Grill Wharton', '112 W Boling Hwy, Wharton, TX 77488, USA'), -- food
     (27684, 'McDonald''s', '350 Walnut St, Wharton, TX 77488, USA'), -- chain
     (27701, 'McDonald''s', '1317 N Brazos St, Whitney, TX 76692, USA'), -- chain
     (27705, 'The Cove Restaurant', 'Mohegan Trail, Whitney, TX 76692, USA'), -- restaurant
-    (27718, 'Hook & Ladder Coffees & Wine Co.', '616 7th St, Wichita Falls, TX 76301, USA'), -- bar/alcohol
     (27733, 'Zeke''s BBQ', '19000 US-281, Windthorst, TX 76389, USA'), -- food
     (27742, 'Sinclair Market', '100 W Broadway St, Winnsboro, TX 75494, USA'), -- retail/services
     (27743, 'The Barrel House Bar & Grill', '501 E Broadway St, Winnsboro, TX 75494, USA'), -- bar/alcohol, food
@@ -1401,7 +1389,6 @@ WHERE (id, name, address) IN (VALUES
     (28802, 'Smoothies on the Square', '104 S Main St, Berea, KY 40403, USA'), -- juice/dessert
     (28834, 'Sue’s Lakeview Restaurant', '945 Gratz Road, KY-22, Owenton, KY 40359, USA'), -- restaurant
     (28835, 'Sugar Bowl Antiques', '6641 US-62 West, Kuttawa, KY 42055, USA'), -- retail/services
-    (28849, 'Tasty Teas Sandwich Shop', '3767 N Mayo Trail, Pikeville, KY 41501, USA'), -- food
     (28859, 'THE BUTLER MARKET', '106 Front St, Butler, KY 41006, USA'), -- retail/services
     (28870, 'The Country Barn Garden & Farm Market', '112 Britmart Rd, Elkton, KY 42220, USA'), -- retail/services
     (28884, 'The Grape Vines Wine Bar', '485 Lebanon Rd, Crittenden, KY 41030, USA'), -- bar/alcohol
@@ -1536,7 +1523,6 @@ WHERE (id, name, address) IN (VALUES
     (32047, 'Buster''s Restaurant', '1130 Paterson St, Ogdensburg, NY 13669, USA'), -- restaurant
     (32183, 'Catskill Mountain Country Store & Restaurant-Windham', '5510 NY-23, Windham, NY 12496, USA'), -- restaurant
     (32224, 'Clapper''s Glass Bar', '295 Main St, Schoharie, NY 12157, USA'), -- bar/alcohol
-    (32291, 'Copperbarn Coffeebar & Eatery', '368 E Main St, Middletown, NY 10940, USA'), -- restaurant
     (32298, 'Cottage Restaurant', '21 Oswego St, Baldwinsville, NY 13027, USA'), -- restaurant
     (32303, 'County Seat Restaurant & Lounge', 'Best Western University Inn, 90 E Main St, Canton, NY 13617, USA'), -- restaurant, bar/alcohol
     (32316, 'Creekside Market', '13971 US-62, Collins, NY 14034, USA'), -- retail/services
@@ -1789,7 +1775,6 @@ WHERE (id, name, address) IN (VALUES
     (37824, 'McDonald''s', '2608 S 1st St, Tucumcari, NM 88401, USA'), -- chain
     (37835, 'Motel Safari', '722 E Rte 66 Blvd, Tucumcari, NM 88401, USA'), -- lodging/venue
     (37843, 'NM Vintage Wines, Beers, Spirits & Cigars', '2310 Avenida de Mesilla, Mesilla, NM 88046, USA'), -- bar/alcohol
-    (37887, 'Santa Fe Biscochito Company Coffees and Creamery', '330 Sandoval St, Santa Fe, NM 87501, USA'), -- juice/dessert
     (37892, 'Shaffer Hotel and Dining Room', '103 W Main St, Mountainair, NM 87036, USA'), -- lodging/venue
     (37951, 'The Paleta Bar Bernalillo', '510 NM-528 suite f, Bernalillo, NM 87004, USA'), -- bar/alcohol
     (37952, 'The Patio Restaurant', '100 Cortez Ave, Hurley, NM 88043, USA'), -- restaurant
@@ -1820,7 +1805,6 @@ WHERE (id, name, address) IN (VALUES
     (38318, 'Lovera''s Italian Market', '95 NW 6th St, Krebs, OK 74554, USA'), -- retail/services
     (38371, 'Bricktown Brewery', '415 W Shawnee St, Muskogee, OK 74401, USA'), -- bar/alcohol
     (38404, 'The FARMacy Barn to Table Market', '205 S Ochelata St, Ochelata, OK 74051, USA'), -- restaurant, retail/services
-    (38456, 'Teapioca Lounge', '1101 NW 23rd St Suite B, Oklahoma City, OK 73106, USA'), -- bar/alcohol
     (38487, 'The Dirty Laundry Saloon - Bar & Grill', '112 E 6th St, Pawhuska, OK 74056, USA'), -- bar/alcohol, food
     (38507, 'Downstream Casino Resort', '69300 E Nee Rd, Quapaw, OK 74363, USA'), -- lodging/venue
     (38525, 'Pulse Fitness LLC', 'Drive through Alley!, 346 S Main St, Shattuck, OK 73858, USA'), -- retail/services

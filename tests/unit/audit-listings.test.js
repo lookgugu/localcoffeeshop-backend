@@ -8,6 +8,7 @@ const { classify } = require('../../scripts/audit-listings');
 describe('classify(name)', () => {
   it.each([
     ['Woods Hill Table', ['restaurant']],
+    ["Lucky's Steakhouse", ['restaurant']], // "tea" inside a word is not tea
     ['Backroads Bar & Grill', ['bar/alcohol', 'food']],
     ['Whitman Brewing Company', ['bar/alcohol']],
     ["McDonald's", ['chain']],
@@ -26,6 +27,14 @@ describe('classify(name)', () => {
     'Kylies Kaffiene bar',
     'The Nitro Bar',
     'Main Streets Market & Cafe',
+    // Coffee stems inside a word (Codex review on #14).
+    'Steamworks Coffeebar and Eatery',
+    'Hook & Ladder Coffees & Wine Co.',
+    'Red Rambler Coffees & Ramblin’ Red’s Brewing Co.',
+    'KentJava Bar',
+    'Cocoa Beanery At Hershey Lodge',
+    'Teapioca Lounge',
+    'King Kong Milktea & Smoothie Morrow',
     // Ambiguous: kept for a person to judge.
     "Something's Brewing Too",
     'Panera Bread',

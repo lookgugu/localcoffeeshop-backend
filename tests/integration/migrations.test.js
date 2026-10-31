@@ -15,12 +15,19 @@ const sqlite3 = require('sqlite3');
 
 const ROOT = path.join(__dirname, '..', '..');
 const TRACKED_DB = path.join(ROOT, 'data', 'coffee_shops.db');
-const CLEANUP_MIGRATION = '20261030_remove_non_coffee_listings.sql';
-const NEW_MIGRATIONS = ['20261017_01_create_shop_submissions.sql', '20261017_02_idempotency_request_hash.sql', CLEANUP_MIGRATION];
-// Listings CLEANUP_MIGRATION removes (not coffee shops). Every other published row must survive.
-const REMOVED_LISTINGS = [
-    { id: 27841, name: 'Woods Hill Table', address: '24 Commonwealth Ave, Concord, MA 01742, USA' },
-];
+const DEDUP_MIGRATION = '20261030_01_remove_duplicate_listings.sql';
+const CLEANUP_MIGRATION = '20261030_02_remove_non_coffee_listings.sql';
+const NEW_MIGRATIONS = ['20261017_01_create_shop_submissions.sql', '20261017_02_idempotency_request_hash.sql', DEDUP_MIGRATION, CLEANUP_MIGRATION];
+
+/** The (id, name, address) rows CLEANUP_MIGRATION deletes, parsed from its VALUES list. */
+function removedListings() {
+    const sql = fs.readFileSync(path.join(ROOT, 'migrations', CLEANUP_MIGRATION), 'utf8');
+    const sqlString = "'((?:[^']|'')*)'";
+    const tuple = new RegExp(`^\\s*\\((\\d+), ${sqlString}, ${sqlString}\\),?(?: --.*)?$`, 'gm');
+    return [...sql.matchAll(tuple)].map(([, id, name, address]) => ({
+        id: Number(id), name: name.replace(/''/g, "'"), address: address.replace(/''/g, "'"),
+    }));
+}
 
 function sha256File(file) {
     return crypto.createHash('sha256').update(fs.readFileSync(file)).digest('hex');
@@ -122,18 +129,29 @@ describe('Migrations (scripts/migrate.js)', () => {
         expect(await columns(dbPath, 'idempotency_keys')).toContain('request_hash');
     });
 
-    it('existing database (copy of data/coffee_shops.db): only the listed non-coffee listings removed, reapply is a no-op', async () => {
+    it('existing database (copy of data/coffee_shops.db): removes only duplicate copies and the listed non-coffee listings, reapply is a no-op', async () => {
         const dbPath = path.join(tmp, 'existing.db');
         fs.copyFileSync(TRACKED_DB, dbPath);
         const rowsBefore = await publishedRows(dbPath);
         const appliedBefore = await appliedMigrations(dbPath);
         expect(appliedBefore).not.toEqual(expect.arrayContaining(NEW_MIGRATIONS));
-        // Each listing to remove is in the tracked DB exactly as matched.
-        for (const listing of REMOVED_LISTINGS) {
-            expect(rowsBefore.find((r) => r.id === listing.id)).toEqual(expect.objectContaining(listing));
+
+        // Dedup keeps the lowest id of each (name, address) group.
+        const kept = new Map();
+        for (const r of rowsBefore) {
+            const key = `${r.name.toLowerCase()}\u0000${r.address}`;
+            if (!kept.has(key) || r.id < kept.get(key).id) kept.set(key, r);
         }
-        const removedIds = new Set(REMOVED_LISTINGS.map((l) => l.id));
-        const before = digest(rowsBefore.filter((r) => !removedIds.has(r.id)));
+        // Every listing the cleanup names is a kept row, exactly as matched, so none is a silent no-op.
+        const removed = removedListings();
+        expect(removed.length).toBeGreaterThan(1000);
+        expect(removed).toContainEqual({ id: 27841, name: 'Woods Hill Table', address: '24 Commonwealth Ave, Concord, MA 01742, USA' });
+        const keptById = new Map([...kept.values()].map((r) => [r.id, r]));
+        for (const listing of removed) {
+            expect(keptById.get(listing.id)).toEqual(expect.objectContaining(listing));
+        }
+        const removedIds = new Set(removed.map((l) => l.id));
+        const before = digest(rowsBefore.filter((r) => keptById.has(r.id) && !removedIds.has(r.id)));
 
         migrate(dbPath, 'up');
 
@@ -209,10 +227,10 @@ describe('Migrations (scripts/migrate.js)', () => {
             expect(await snapshot(dbPath)).toEqual(before);
             expect(before.keys.find((k) => k.key === 'retained-key').request_hash).toBe(FINGERPRINT);
 
-            // Only the later cleanup migration is pending; reapplying it removes nothing more.
+            // Only the later cleanup migrations are pending; reapplying them removes nothing more.
             migrate(dbPath, 'up');
             const after = await snapshot(dbPath);
-            expect(after.ledger.map((r) => r.name)).toEqual([...before.ledger.map((r) => r.name), CLEANUP_MIGRATION].sort());
+            expect(after.ledger.map((r) => r.name)).toEqual([...before.ledger.map((r) => r.name), DEDUP_MIGRATION, CLEANUP_MIGRATION].sort());
             expect({ ...after, ledger: before.ledger }).toEqual(before);
             expect(migrate(dbPath, 'up')).toMatch(/No pending migrations/);
         });
@@ -232,7 +250,7 @@ describe('Migrations (scripts/migrate.js)', () => {
 
             migrate(dbPath, 'up');
             const after = await snapshot(dbPath);
-            expect(after.ledger.map((r) => r.name)).toEqual([...before.ledger.map((r) => r.name), '20261017_02_idempotency_request_hash.sql', CLEANUP_MIGRATION].sort());
+            expect(after.ledger.map((r) => r.name)).toEqual([...before.ledger.map((r) => r.name), '20261017_02_idempotency_request_hash.sql', DEDUP_MIGRATION, CLEANUP_MIGRATION].sort());
             expect(after.submissions).toEqual(before.submissions);
             expect(await columns(dbPath, 'idempotency_keys')).toContain('request_hash');
             expect(migrate(dbPath, 'up')).toMatch(/No pending migrations/);

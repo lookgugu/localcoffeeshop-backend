@@ -11,6 +11,7 @@
     "test:coverage": "jest --coverage --detectOpenHandles --forceExit",
     "migrate": "node scripts/migrate.js",
     "import:coordinates": "node scripts/import-coordinates.js",
+    "geocode:missing": "node scripts/geocode-missing.js",
     "backup": "node scripts/backup-database.js"
   },
   "dependencies": {

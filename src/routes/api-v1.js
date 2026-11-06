@@ -14,6 +14,7 @@ const { mountSearch } = require('./search');
 const { mountOps } = require('./ops');
 const { mountCoffeeShops } = require('./coffee-shops');
 const { mountNearby } = require('./nearby');
+const { mountWaitlist } = require('./waitlist');
 
 function mountApiV1(app, deps) {
     const router = express.Router();
@@ -24,6 +25,7 @@ function mountApiV1(app, deps) {
     mountNearby(router, deps);
     mountOps(router, deps);
     mountCoffeeShops(router, deps);
+    mountWaitlist(router, deps);
 
     app.use('/api/v1', router);
 

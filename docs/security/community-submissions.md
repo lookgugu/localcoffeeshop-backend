@@ -20,14 +20,14 @@ Before this change, `POST /api/v1/coffee-shops` inserted straight into the publi
 | Kill switch | `SUBMISSIONS_ENABLED`. **Production is closed by default (503 `SUBMISSIONS_DISABLED`) and opens only on the exact value `true`.** Development and test default to open, and there `false/0/off/no` closes it. |
 | Logging | Each accepted proposal logs `event: shop_submission_queued` with submissionId, kind and targetShopId only. No user-supplied content is logged. |
 
-There is **deliberately no moderation, publication or admin endpoint**. No browser secret was added. Nothing in the app reads from `shop_submissions`.
+There is **deliberately no moderation, publication or admin endpoint**. No browser secret was added. Nothing in the app reads from `shop_submissions`. A private, local operator CLI for recording moderation decisions (never publication) was added later; see [submission-review-cli.md](submission-review-cli.md).
 
 ## Release blocker (needs an operator decision)
 
 DigitalOcean app `bc7a8c43-…` runs one instance. It serves the SQLite file baked into the image, on an ephemeral filesystem, and auto-deploys from `main`. As a result:
 
 1. **Every queued submission is lost on each deploy, restart or instance replacement.** The queue is not durable, and no config flag can make it durable.
-2. **No review or publication path exists in this repository, and reviewer ownership is not documented here.** Whether a reviewer exists outside the repository is unknown; it must be confirmed and recorded before opening the queue.
+2. **No publication path exists in this repository, and reviewer ownership is not documented here.** A local review CLI ([submission-review-cli.md](submission-review-cli.md)) can record decisions on a SQLite copy, but it does not make the queue durable and does not identify an owner. Whether a reviewer exists outside the repository is unknown; it must be confirmed and recorded before opening the queue.
 
 Production therefore ships with submissions **closed**. While the gate below is unmet, community proposals in production get an honest 503 "temporarily closed" instead of a 202 that would later be silently dropped. Set `SUBMISSIONS_ENABLED=true` only after **both** of these are true:
 
@@ -42,8 +42,9 @@ Migrations are additive and **forward-only**. They run automatically at boot (`n
 
 - `20261017_01_create_shop_submissions.sql`: new table and index.
 - `20261017_02_idempotency_request_hash.sql`: `ALTER TABLE idempotency_keys ADD COLUMN request_hash`.
+- `20261017_03_create_submission_reviews.sql`: append-only moderation decision audit table and its triggers (written only by the operator CLI).
 
-Neither migration has a `down` section. `npm run migrate -- down` refuses them ("No down migration found", non-zero exit) and changes nothing: the ledger, queued proposals and stored fingerprints all stay as they were, and the next `up` is a no-op. Both objects are inert to code that doesn't reference them, so no schema rollback is ever needed. Never run migrations against the tracked `data/coffee_shops.db`.
+None of these migrations has a `down` section. `npm run migrate -- down` refuses them ("No down migration found", non-zero exit) and changes nothing: the ledger, queued proposals, stored fingerprints and review audit rows all stay as they were, and the next `up` is a no-op. All three objects are inert to code that doesn't reference them, so no schema rollback is ever needed. Never run migrations against the tracked `data/coffee_shops.db`.
 
 **Deploy:** merge to `main`, which auto-deploys. Leave `SUBMISSIONS_ENABLED` unset in the app spec. Afterwards, check (read-only) that `GET /api/v1/health` returns 200. Do **not** test the write path in production. An invalid `SUBMISSION_QUEUE_MAX`, `WRITE_RATE_LIMIT_MAX` or `WRITE_RATE_LIMIT_WINDOW_MS` makes the boot fail with an error naming the variable. Allowed values: queue 0–100000 (0 accepts nothing), write max 1–10000, window 1000–86400000 ms. Unset or empty means the default.
 
@@ -77,7 +78,7 @@ Lock-only, semver-compatible, limited to the request path: express 4.22.3, body-
 
 ## Known limitations and follow-ups
 
-- The queue is ephemeral (see the release blocker above), and there is no review UI or publication path.
+- The queue is ephemeral (see the release blocker above), and there is no review UI or publication path. The local review CLI records decisions only.
 - Rate limiting is per IP. A distributed attacker can still fill the queue up to the cap, after which they hit 503. `trust proxy = 1` assumes exactly one proxy hop at DO; check this against real DO headers before relying on per-client fairness.
 - **Deferred baseline defect B-01 (pre-dates this change, not fixed here):** expired `idempotency_keys` rows are only removed by a 1% probabilistic sweep. The lookup ignores rows older than the TTL (`created_at > now - 86400`), but the reservation `INSERT OR IGNORE` still collides with the expired row's primary key and returns `changes === 0`. The middleware reports that as a lost race, so reusing a key more than 24h after its first use gets **409 `IDEMPOTENCY_IN_PROGRESS`** until a sweep happens to run. Impact: availability for that key only, with no data exposure or bypass. The frontend uses a fresh UUID per submit, so it doesn't hit this. Suggested fix: `DELETE FROM idempotency_keys WHERE key = ? AND created_at <= ?` before reserving, with a real-SQLite regression test.
 - **Deferred baseline items B-02 (pre-existing, not fixed here):** (a) the non-API 404 handler returns 500 because `src/public/html/404.html` is missing. (b) If the idempotency lookup or reservation fails with a storage error, the request falls through and is executed (fail-open); the worst case is now a duplicate *pending* row, bounded by the queue cap and the write limit. (c) The `Dockerfile` doesn't set `DB_PATH`, so container runs without the app-spec env default to `./coffee_shops.db`. (d) Jest `collectCoverageFrom` covers only `src/server.js` and `src/db.js`.

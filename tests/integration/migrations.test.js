@@ -15,9 +15,22 @@ const sqlite3 = require('sqlite3');
 
 const ROOT = path.join(__dirname, '..', '..');
 const TRACKED_DB = path.join(ROOT, 'data', 'coffee_shops.db');
+const REVIEWS_MIGRATION = '20261017_03_create_submission_reviews.sql';
 const DEDUP_MIGRATION = '20261030_01_remove_duplicate_listings.sql';
 const CLEANUP_MIGRATION = '20261030_02_remove_non_coffee_listings.sql';
-const NEW_MIGRATIONS = ['20261017_01_create_shop_submissions.sql', '20261017_02_idempotency_request_hash.sql', DEDUP_MIGRATION, CLEANUP_MIGRATION];
+const NEW_MIGRATIONS = [
+    '20261017_01_create_shop_submissions.sql',
+    '20261017_02_idempotency_request_hash.sql',
+    REVIEWS_MIGRATION,
+    DEDUP_MIGRATION,
+    CLEANUP_MIGRATION,
+];
+// Test setup only: rewind a throw-away copy to the state before 20261017_03.
+const REWIND_03 = `
+    DROP TRIGGER submission_reviews_append_only_update;
+    DROP TRIGGER submission_reviews_append_only_delete;
+    DROP TABLE submission_reviews;
+    DELETE FROM migrations WHERE name = '${REVIEWS_MIGRATION}';`;
 
 /** The (id, name, address) rows CLEANUP_MIGRATION deletes, parsed from its VALUES list. */
 function removedListings() {
@@ -127,6 +140,9 @@ describe('Migrations (scripts/migrate.js)', () => {
             'phone_number', 'website', 'description', 'language_code', 'status', 'created_at',
         ]));
         expect(await columns(dbPath, 'idempotency_keys')).toContain('request_hash');
+        expect(await columns(dbPath, 'submission_reviews')).toEqual([
+            'id', 'submission_id', 'old_status', 'new_status', 'reviewer', 'reason', 'payload_sha256', 'decided_at',
+        ]);
     });
 
     it('existing database (copy of data/coffee_shops.db): removes only duplicate copies and the listed non-coffee listings, reapply is a no-op', async () => {
@@ -184,19 +200,56 @@ describe('Migrations (scripts/migrate.js)', () => {
         });
     });
 
+    it('submission_reviews: CHECK, UNIQUE and append-only triggers reject invalid or altered audit rows', async () => {
+        const dbPath = path.join(tmp, 'audit-checks.db');
+        fs.copyFileSync(path.join(tmp, 'existing.db'), dbPath);
+        const SHA = 'b'.repeat(64);
+        await withDb(dbPath, async (db) => {
+            await exec(db, `INSERT INTO shop_submissions (id, kind, name, address, state, status, created_at)
+                            VALUES (7, 'create', 'P', '1 St', 'CA', 'pending', 1);`);
+            const insert = (cols) => exec(db, `INSERT INTO submission_reviews
+                (submission_id, old_status, new_status, reviewer, reason, payload_sha256, decided_at)
+                VALUES (${cols.join(', ')})`);
+            const good = ['7', "'pending'", "'approved'", "'op'", "'ok'", `'${SHA}'`, '1'];
+            const bad = [
+                ['7', "'approved'", "'rejected'", "'op'", "'ok'", `'${SHA}'`, '1'],
+                ['7', "'pending'", "'pending'", "'op'", "'ok'", `'${SHA}'`, '1'],
+                ['7', "'pending'", "'published'", "'op'", "'ok'", `'${SHA}'`, '1'],
+                ['7', "'pending'", "'approved'", "''", "'ok'", `'${SHA}'`, '1'],
+                ['7', "'pending'", "'approved'", `'${'r'.repeat(65)}'`, "'ok'", `'${SHA}'`, '1'],
+                ['7', "'pending'", "'approved'", "'op'", "''", `'${SHA}'`, '1'],
+                ['7', "'pending'", "'approved'", "'op'", `'${'x'.repeat(501)}'`, `'${SHA}'`, '1'],
+                ['7', "'pending'", "'approved'", "'op'", "'ok'", "'abc'", '1'],
+                ['7', "'pending'", "'approved'", "'op'", "'ok'", `'${'G'.repeat(64)}'`, '1'],
+                ['7', "'pending'", "'approved'", "'op'", "'ok'", `'${SHA}'`, 'NULL'],
+            ];
+            for (const cols of bad) {
+                await expect(insert(cols)).rejects.toThrow(/CHECK constraint failed|NOT NULL constraint failed/);
+            }
+            await insert(good);
+            await expect(insert(good)).rejects.toThrow(/UNIQUE constraint failed/);
+            await expect(exec(db, "UPDATE submission_reviews SET reason = 'edited'")).rejects.toThrow(/append-only/);
+            await expect(exec(db, 'DELETE FROM submission_reviews')).rejects.toThrow(/append-only/);
+            expect(await all(db, 'SELECT reason FROM submission_reviews')).toEqual([{ reason: 'ok' }]);
+        });
+    });
+
     describe('forward-only: `down` is refused and retains ledger, queued proposals and fingerprints', () => {
         const FINGERPRINT = 'a'.repeat(64);
 
         async function seedRetainedData(dbPath, { withFingerprint }) {
             await withDb(dbPath, (db) => exec(db, `
                 INSERT INTO shop_submissions (kind, name, address, state, status, created_at)
-                VALUES ('create', 'Queued Proposal', '1 Keep St', 'CA', 'pending', 1);
+                VALUES ('create', 'Queued Proposal', '1 Keep St', 'CA', 'pending', 1),
+                       ('create', 'Reviewed Proposal', '2 Keep St', 'CA', 'rejected', 2);
                 INSERT INTO idempotency_keys (key, endpoint, status_code, response, created_at, status${withFingerprint ? ', request_hash' : ''})
                 VALUES ('retained-key', 'POST /coffee-shops', 202, '{}', 1, 'completed'${withFingerprint ? `, '${FINGERPRINT}'` : ''});`));
         }
 
         async function snapshot(dbPath) {
             return withDb(dbPath, async (db) => ({
+                reviews: (await all(db, "SELECT name FROM sqlite_master WHERE name = 'submission_reviews'")).length
+                    ? await all(db, 'SELECT * FROM submission_reviews ORDER BY id') : null,
                 ledger: await all(db, 'SELECT name FROM migrations ORDER BY name'),
                 submissions: await all(db, 'SELECT * FROM shop_submissions ORDER BY id'),
                 keys: await all(db, 'SELECT * FROM idempotency_keys ORDER BY key'),
@@ -216,22 +269,50 @@ describe('Migrations (scripts/migrate.js)', () => {
             return `${failure.stdout}${failure.stderr}`;
         }
 
+        it('20261017_03 (latest applied): down refused; audit rows, queue rows, fingerprints and ledger intact; up then applies only what follows', async () => {
+            const dbPath = path.join(tmp, 'retain-03.db');
+            fs.copyFileSync(path.join(tmp, 'existing.db'), dbPath);
+            await asIfLatest(dbPath, REVIEWS_MIGRATION);
+            await seedRetainedData(dbPath, { withFingerprint: true });
+            await withDb(dbPath, (db) => exec(db, `
+                INSERT INTO submission_reviews (submission_id, old_status, new_status, reviewer, reason, payload_sha256, decided_at)
+                SELECT id, 'pending', 'rejected', 'op-1', 'duplicate listing', '${'c'.repeat(64)}', 3
+                FROM shop_submissions WHERE name = 'Reviewed Proposal';`));
+            const before = await snapshot(dbPath);
+            expect(before.reviews).toHaveLength(1);
+
+            expect(migrateExpectingRefusal(dbPath)).toMatch(/No down migration found in 20261017_03_create_submission_reviews\.sql/);
+            expect(await snapshot(dbPath)).toEqual(before);
+
+            migrate(dbPath, 'up');
+            const after = await snapshot(dbPath);
+            expect(after.ledger.map((r) => r.name)).toEqual([...before.ledger.map((r) => r.name), DEDUP_MIGRATION, CLEANUP_MIGRATION].sort());
+            expect({ ...after, ledger: before.ledger }).toEqual(before);
+            expect(migrate(dbPath, 'up')).toMatch(/No pending migrations/);
+        });
+
         it('20261017_02 (latest applied): down refused; request_hash values, queue rows and ledger intact; up then applies only what follows', async () => {
             const dbPath = path.join(tmp, 'retain-02.db');
             fs.copyFileSync(path.join(tmp, 'existing.db'), dbPath);
             await asIfLatest(dbPath, '20261017_02_idempotency_request_hash.sql');
+            await withDb(dbPath, (db) => exec(db, REWIND_03));
             await seedRetainedData(dbPath, { withFingerprint: true });
             const before = await snapshot(dbPath);
+            expect(before.reviews).toBeNull();
 
             expect(migrateExpectingRefusal(dbPath)).toMatch(/No down migration found in 20261017_02_idempotency_request_hash\.sql/);
             expect(await snapshot(dbPath)).toEqual(before);
             expect(before.keys.find((k) => k.key === 'retained-key').request_hash).toBe(FINGERPRINT);
 
-            // Only the later cleanup migrations are pending; reapplying them removes nothing more.
+            // Only 03 and the later cleanup migrations are pending; reapplying them removes nothing more.
             migrate(dbPath, 'up');
             const after = await snapshot(dbPath);
-            expect(after.ledger.map((r) => r.name)).toEqual([...before.ledger.map((r) => r.name), DEDUP_MIGRATION, CLEANUP_MIGRATION].sort());
-            expect({ ...after, ledger: before.ledger }).toEqual(before);
+            expect(after.ledger.map((r) => r.name)).toEqual([
+                ...before.ledger.map((r) => r.name), REVIEWS_MIGRATION, DEDUP_MIGRATION, CLEANUP_MIGRATION,
+            ].sort());
+            expect(after.submissions).toEqual(before.submissions);
+            expect(after.keys).toEqual(before.keys);
+            expect(after.reviews).toEqual([]);
             expect(migrate(dbPath, 'up')).toMatch(/No pending migrations/);
         });
 
@@ -240,7 +321,8 @@ describe('Migrations (scripts/migrate.js)', () => {
             fs.copyFileSync(path.join(tmp, 'existing.db'), dbPath);
             // Test setup only: put this throw-away copy in the state "01 applied, 02 not yet".
             await asIfLatest(dbPath, '20261017_01_create_shop_submissions.sql');
-            await withDb(dbPath, (db) => exec(db, 'ALTER TABLE idempotency_keys DROP COLUMN request_hash;'));
+            await withDb(dbPath, (db) => exec(db, `${REWIND_03}
+                ALTER TABLE idempotency_keys DROP COLUMN request_hash;`));
             await seedRetainedData(dbPath, { withFingerprint: false });
             const before = await snapshot(dbPath);
             expect(before.ledger.map((r) => r.name)).toContain('20261017_01_create_shop_submissions.sql');
@@ -250,7 +332,9 @@ describe('Migrations (scripts/migrate.js)', () => {
 
             migrate(dbPath, 'up');
             const after = await snapshot(dbPath);
-            expect(after.ledger.map((r) => r.name)).toEqual([...before.ledger.map((r) => r.name), '20261017_02_idempotency_request_hash.sql', DEDUP_MIGRATION, CLEANUP_MIGRATION].sort());
+            expect(after.ledger.map((r) => r.name)).toEqual([
+                ...before.ledger.map((r) => r.name), '20261017_02_idempotency_request_hash.sql', REVIEWS_MIGRATION, DEDUP_MIGRATION, CLEANUP_MIGRATION,
+            ].sort());
             expect(after.submissions).toEqual(before.submissions);
             expect(await columns(dbPath, 'idempotency_keys')).toContain('request_hash');
             expect(migrate(dbPath, 'up')).toMatch(/No pending migrations/);

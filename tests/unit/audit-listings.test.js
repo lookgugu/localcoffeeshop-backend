@@ -1,6 +1,7 @@
 /**
- * Unit Tests for scripts/audit-listings.js, which generated the removal list
- * in migrations/20261030_02_remove_non_coffee_listings.sql.
+ * Unit Tests for scripts/audit-listings.js, which generated the removal lists
+ * in migrations/20261030_02_remove_non_coffee_listings.sql and
+ * migrations/20261118_01_remove_starbucks_listings.sql.
  */
 
 const { classify } = require('../../scripts/audit-listings');
@@ -12,6 +13,12 @@ describe('classify(name)', () => {
     ['Backroads Bar & Grill', ['bar/alcohol', 'food']],
     ['Whitman Brewing Company', ['bar/alcohol']],
     ["McDonald's", ['chain']],
+    ['Starbucks', ['chain']],
+    ['Starbucks Coffee', ['chain']],
+    ['Starbucks Reserve Roastery', ['chain']],
+    ['Roberts Café - Starbucks', ['chain']],
+    ['Sisters Cafe at Manchester University (WPS Starbucks)', ['chain']],
+    ['Flatz (We Proudly Serve Starbucks)', ['chain']],
     ['Circle K', ['retail/services']],
     ['Iron Creek Inn & Suites', ['lodging/venue']],
     ['Riviera Creamery', ['juice/dessert']],
@@ -42,6 +49,8 @@ describe('classify(name)', () => {
     "Massimo’s Italian Bakery Lemoyne",
     'River Reader Bookstore',
     'Swedish Hill at Aspen Art Museum',
+    // Non-Starbucks word boundary ("Starbuck, MN").
+    'Starbuck Community Center',
     // No signal either way.
     'Nashoba Brook Bakery',
     'Concord Teacakes',

@@ -19,6 +19,7 @@ const REVIEWS_MIGRATION = '20261017_03_create_submission_reviews.sql';
 const DEDUP_MIGRATION = '20261030_01_remove_duplicate_listings.sql';
 const CLEANUP_MIGRATION = '20261030_02_remove_non_coffee_listings.sql';
 const STARBUCKS_MIGRATION = '20261118_01_remove_starbucks_listings.sql';
+const DUNKIN_MIGRATION = '20261118_02_remove_dunkin_listings.sql';
 const NEW_MIGRATIONS = [
     '20261017_01_create_shop_submissions.sql',
     '20261017_02_idempotency_request_hash.sql',
@@ -26,6 +27,7 @@ const NEW_MIGRATIONS = [
     DEDUP_MIGRATION,
     CLEANUP_MIGRATION,
     STARBUCKS_MIGRATION,
+    DUNKIN_MIGRATION,
 ];
 // Test setup only: rewind a throw-away copy to the state before 20261017_03.
 const REWIND_03 = `
@@ -147,7 +149,7 @@ describe('Migrations (scripts/migrate.js)', () => {
         ]);
     });
 
-    it('existing database (copy of data/coffee_shops.db): removes only duplicate copies, non-coffee listings and Starbucks listings, reapply is a no-op', async () => {
+    it('existing database (copy of data/coffee_shops.db): removes only duplicate copies, non-coffee listings, Starbucks and Dunkin listings, reapply is a no-op', async () => {
         const dbPath = path.join(tmp, 'existing.db');
         fs.copyFileSync(TRACKED_DB, dbPath);
         const rowsBefore = await publishedRows(dbPath);
@@ -160,13 +162,15 @@ describe('Migrations (scripts/migrate.js)', () => {
             const key = `${r.name.toLowerCase()}\u0000${r.address}`;
             if (!kept.has(key) || r.id < kept.get(key).id) kept.set(key, r);
         }
-        // Every listing the cleanup and Starbucks migrations name is a kept row, exactly as matched, so none is a silent no-op.
+        // Every listing the cleanup, Starbucks and Dunkin migrations name is a kept row, exactly as matched, so none is a silent no-op.
         const removedNonCoffee = removedListings(CLEANUP_MIGRATION);
         const removedStarbucks = removedListings(STARBUCKS_MIGRATION);
+        const removedDunkin = removedListings(DUNKIN_MIGRATION);
         expect(removedNonCoffee.length).toBeGreaterThan(1000);
         expect(removedNonCoffee).toContainEqual({ id: 27841, name: 'Woods Hill Table', address: '24 Commonwealth Ave, Concord, MA 01742, USA' });
         expect(removedStarbucks).toHaveLength(1234);
-        const removed = [...removedNonCoffee, ...removedStarbucks];
+        expect(removedDunkin).toHaveLength(369);
+        const removed = [...removedNonCoffee, ...removedStarbucks, ...removedDunkin];
         const keptById = new Map([...kept.values()].map((r) => [r.id, r]));
         for (const listing of removed) {
             expect(keptById.get(listing.id)).toEqual(expect.objectContaining(listing));
@@ -178,8 +182,8 @@ describe('Migrations (scripts/migrate.js)', () => {
 
         expect(await publishedDigest(dbPath)).toEqual(before);
         expect(await appliedMigrations(dbPath)).toEqual(expect.arrayContaining([...appliedBefore, ...NEW_MIGRATIONS]));
-        const remainingStarbucks = await withDb(dbPath, (db) => all(db, "SELECT id FROM coffee_shops WHERE lower(name) LIKE '%starbucks%'"));
-        expect(remainingStarbucks).toEqual([]);
+        const remainingChains = await withDb(dbPath, (db) => all(db, "SELECT id FROM coffee_shops WHERE lower(name) LIKE '%starbucks%' OR lower(name) LIKE '%dunkin%'"));
+        expect(remainingChains).toEqual([]);
         const schemaAfterFirst = await schemaOf(dbPath);
 
         const second = migrate(dbPath, 'up');
@@ -294,7 +298,7 @@ describe('Migrations (scripts/migrate.js)', () => {
             migrate(dbPath, 'up');
             const after = await snapshot(dbPath);
             expect(after.ledger.map((r) => r.name)).toEqual([
-                ...before.ledger.map((r) => r.name), DEDUP_MIGRATION, CLEANUP_MIGRATION, STARBUCKS_MIGRATION,
+                ...before.ledger.map((r) => r.name), DEDUP_MIGRATION, CLEANUP_MIGRATION, STARBUCKS_MIGRATION, DUNKIN_MIGRATION,
             ].sort());
             expect({ ...after, ledger: before.ledger }).toEqual(before);
             expect(migrate(dbPath, 'up')).toMatch(/No pending migrations/);
@@ -317,7 +321,7 @@ describe('Migrations (scripts/migrate.js)', () => {
             migrate(dbPath, 'up');
             const after = await snapshot(dbPath);
             expect(after.ledger.map((r) => r.name)).toEqual([
-                ...before.ledger.map((r) => r.name), REVIEWS_MIGRATION, DEDUP_MIGRATION, CLEANUP_MIGRATION, STARBUCKS_MIGRATION,
+                ...before.ledger.map((r) => r.name), REVIEWS_MIGRATION, DEDUP_MIGRATION, CLEANUP_MIGRATION, STARBUCKS_MIGRATION, DUNKIN_MIGRATION,
             ].sort());
             expect(after.submissions).toEqual(before.submissions);
             expect(after.keys).toEqual(before.keys);
@@ -342,7 +346,7 @@ describe('Migrations (scripts/migrate.js)', () => {
             migrate(dbPath, 'up');
             const after = await snapshot(dbPath);
             expect(after.ledger.map((r) => r.name)).toEqual([
-                ...before.ledger.map((r) => r.name), '20261017_02_idempotency_request_hash.sql', REVIEWS_MIGRATION, DEDUP_MIGRATION, CLEANUP_MIGRATION, STARBUCKS_MIGRATION,
+                ...before.ledger.map((r) => r.name), '20261017_02_idempotency_request_hash.sql', REVIEWS_MIGRATION, DEDUP_MIGRATION, CLEANUP_MIGRATION, STARBUCKS_MIGRATION, DUNKIN_MIGRATION,
             ].sort());
             expect(after.submissions).toEqual(before.submissions);
             expect(await columns(dbPath, 'idempotency_keys')).toContain('request_hash');

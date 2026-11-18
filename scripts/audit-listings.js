@@ -3,7 +3,7 @@
 /**
  * Flag coffee_shops listings whose names say they are not independent coffee
  * shops (restaurants, bars, breweries, grills, hotels, markets, gas stations,
- * juice/ice-cream shops, fast-food chains, and Starbucks).
+ * juice/ice-cream shops, fast-food chains, Starbucks, and Dunkin').
  *
  * Usage:
  *   DB_PATH=./data/coffee_shops.db node scripts/audit-listings.js            # CSV to stdout
@@ -14,26 +14,28 @@
  * or an ambiguous one (bakeries, donut and bagel shops, bookstores, museums
  * and other institutions whose café carries their name, "Something's
  * Brewing"), is never flagged — except explicitly excluded chains like
- * Starbucks, which are flagged even when paired with "Coffee", "Café",
- * "Roastery", or a campus/grocery host name. Only the lowest id of each
- * duplicate (name, address) group is reported, the copy 20261030_01 keeps.
+ * Starbucks and Dunkin', which are flagged even when paired with "Coffee",
+ * "Café", "Donuts", "Roastery", or a campus/grocery host name. Only the
+ * lowest id of each duplicate (name, address) group is reported, the copy
+ * 20261030_01 keeps.
  *
- * migrations/20261030_02_remove_non_coffee_listings.sql and
- * migrations/20261118_01_remove_starbucks_listings.sql were generated with
+ * migrations/20261030_02_remove_non_coffee_listings.sql,
+ * migrations/20261118_01_remove_starbucks_listings.sql, and
+ * migrations/20261118_02_remove_dunkin_listings.sql were generated with
  * --sql; later removals go in a new migration.
  */
 
 const sqlite3 = require('sqlite3');
 
-// Explicitly excluded coffee chains (flagged even if the name also contains
-// "Coffee", "Café", "Roastery", "Market", "University", or "Library").
-const EXCLUDED_COFFEE_CHAIN = /\bstarbucks\b/i;
+// Explicitly excluded coffee/donut chains (flagged even if the name also
+// contains "Coffee", "Café", "Donuts", "Roastery", "Market", or "University").
+const EXCLUDED_COFFEE_CHAIN = /\b(starbucks|dunkin)\b/i;
 
 // Stems that mean coffee anywhere in a word ("Coffeebar", "Coffees", "KentJava").
 const COFFEE_STEM = /(coffee|caffe|kaffee|espresso|java)/i;
 // "tea" only at a word start ("Tearoom", "Teapioca", but not "Steakhouse").
 const TEA = /\b(tea\w*|milk ?tea|beanery|jitters)\b/i;
-const COFFEE = /\b(coffee|cof+e+|cafe?s?|cafecito|caffeine|nitro|caffe|kaffe|kaff?ie?ne|kof+ee|kafe|kofi|espresso|roast(er|ers|ery|ing|ed)?|beans?|brew(s|ed|house|haus)?|latte|java|joe|mocha|cappuccino|perk|grind|cup|mug|drip|pour|barista|kopi|tea(house)?|boba|dunkin|peet'?s|tim hortons|caribou|dutch bros|scooter'?s|biggby|black rifle|blue bottle|philz|la colombe|intelligentsia|stumptown|gregorys|pavement|ziggi'?s|7 brew|pj'?s|human bean|black rock|aroma joe|crema|coffeehouse|coffeeshop)\b/i;
+const COFFEE = /\b(coffee|cof+e+|cafe?s?|cafecito|caffeine|nitro|caffe|kaffe|kaff?ie?ne|kof+ee|kafe|kofi|espresso|roast(er|ers|ery|ing|ed)?|beans?|brew(s|ed|house|haus)?|latte|java|joe|mocha|cappuccino|perk|grind|cup|mug|drip|pour|barista|kopi|tea(house)?|boba|peet'?s|tim hortons|caribou|dutch bros|scooter'?s|biggby|black rifle|blue bottle|philz|la colombe|intelligentsia|stumptown|gregorys|pavement|ziggi'?s|7 brew|pj'?s|human bean|black rock|aroma joe|crema|coffeehouse|coffeeshop)\b/i;
 const AMBIGUOUS = /\b(bakery|bakeries|bake shop|bakehouse|bakers?|donuts?|doughnuts?|bagels?|krispy kreme|panera|books?|bookstore|booksellers?|museum|library|university|college|school|hospital|church|theat(er|re)|cinema|brewing)\b/i;
 const BEER_BREWING = /\b(brewing (co|company)|brewery|brewpub|beer)\b/i;
 const NOT_COFFEE = [

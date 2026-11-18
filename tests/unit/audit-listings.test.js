@@ -1,7 +1,8 @@
 /**
  * Unit Tests for scripts/audit-listings.js, which generated the removal lists
- * in migrations/20261030_02_remove_non_coffee_listings.sql and
- * migrations/20261118_01_remove_starbucks_listings.sql.
+ * in migrations/20261030_02_remove_non_coffee_listings.sql,
+ * migrations/20261118_01_remove_starbucks_listings.sql, and
+ * migrations/20261118_02_remove_dunkin_listings.sql.
  */
 
 const { classify } = require('../../scripts/audit-listings');
@@ -19,6 +20,11 @@ describe('classify(name)', () => {
     ['Roberts Café - Starbucks', ['chain']],
     ['Sisters Cafe at Manchester University (WPS Starbucks)', ['chain']],
     ['Flatz (We Proudly Serve Starbucks)', ['chain']],
+    ["Dunkin'", ['chain']],
+    ['Dunkin’', ['chain']],
+    ['Dunkin', ['chain']],
+    ['Dunkin / Baskin Robins', ['chain']],
+    ['Dunkin Donuts/Baskin Robbins', ['chain']],
     ['Circle K', ['retail/services']],
     ['Iron Creek Inn & Suites', ['lodging/venue']],
     ['Riviera Creamery', ['juice/dessert']],

@@ -128,6 +128,20 @@ describePg('Postgres submission queue', () => {
             await expect(app.query(...review(id))).rejects.toThrow(/permission denied/);
         });
 
+        it('no one can insert a submission that is already decided (status must start pending)', async () => {
+            for (const pool of [app, pg.pool]) {
+                for (const status of ['approved', 'rejected']) {
+                    await expect(pool.query(
+                        `INSERT INTO shop_submissions (kind, name, address, state, status, created_at)
+                         VALUES ('create', 'Sneaky', '1 Main St', 'TX', $1, 1000)`,
+                        [status],
+                    )).rejects.toThrow(/must be inserted as pending/);
+                }
+            }
+            const { rows } = await pg.pool.query("SELECT COUNT(*)::int AS n FROM shop_submissions WHERE name = 'Sneaky'");
+            expect(rows[0].n).toBe(0);
+        });
+
         it('lcs_reviewer can approve and audit, but cannot edit content or enqueue', async () => {
             const id = await insertSubmission(pg.pool);
             await reviewer.query(...review(id));
@@ -257,6 +271,48 @@ describePg('Postgres submission queue', () => {
             const res = await request(baseURL).get('/api/v1/health');
             expect(res.status).toBe(200);
             expect(res.body.data.submissions).toEqual({ open: true, storage: 'postgres', durable: true, queue: 'ok' });
+        });
+    });
+
+    describe('Postgres outage after a healthy boot', () => {
+        let sqlite;
+
+        afterEach(async () => {
+            await stopTestServer();
+            if (sqlite) await closeDatabase(sqlite);
+        });
+
+        it('submissions answer 503 SUBMISSIONS_UNAVAILABLE + Retry-After, not 500', async () => {
+            const pg = await createPgTestDatabase();
+            const queueStore = await startQueueStore({
+                config: { queue: { databaseUrl: pg.url, migrationDatabaseUrl: '', caCert: '' } },
+                db: null,
+                logger: silent,
+            });
+            expect(queueStore.ready).toBe(true);
+            sqlite = await createTestDatabase();
+            const { url } = await startTestServer(sqlite, { env: { WRITE_RATE_LIMIT_MAX: '1000' }, deps: { queueStore } });
+
+            // Database disappears under a running API (connections killed).
+            await pg.drop();
+
+            const body = { shop: { displayName: { text: 'Outage' }, formattedAddress: '1 Main St', state: 'TX' } };
+            for (const req of [
+                request(url).post('/api/v1/coffee-shops').send(body),
+                request(url).post('/api/v1/coffee-shops').set('Idempotency-Key', 'outage-1').send(body),
+            ]) {
+                const res = await req;
+                expect(res.status).toBe(503);
+                expect(res.headers['retry-after']).toBe('60');
+                expect(['SUBMISSIONS_UNAVAILABLE', 'IDEMPOTENCY_UNAVAILABLE']).toContain(res.body.error.code);
+            }
+            const noKey = await request(url).post('/api/v1/coffee-shops').send(body);
+            expect(noKey.body.error.code).toBe('SUBMISSIONS_UNAVAILABLE');
+
+            const health = await request(url).get('/api/v1/health');
+            expect(health.status).toBe(200);
+            expect(health.body.data.submissions).toMatchObject({ open: false, queue: 'error' });
+            await queueStore.close();
         });
     });
 

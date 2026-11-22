@@ -75,6 +75,22 @@ CREATE TRIGGER shop_submissions_guard_update
     BEFORE UPDATE ON shop_submissions
     FOR EACH ROW EXECUTE FUNCTION shop_submissions_guard_update();
 
+-- Every submission enters the queue as pending, whoever inserts it: an
+-- INSERT with status 'approved'/'rejected' would skip review and the audit.
+CREATE OR REPLACE FUNCTION shop_submissions_guard_insert() RETURNS trigger AS $$
+BEGIN
+    IF NEW.status IS DISTINCT FROM 'pending' THEN
+        RAISE EXCEPTION 'shop_submissions must be inserted as pending';
+    END IF;
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+DROP TRIGGER IF EXISTS shop_submissions_guard_insert ON shop_submissions;
+CREATE TRIGGER shop_submissions_guard_insert
+    BEFORE INSERT ON shop_submissions
+    FOR EACH ROW EXECUTE FUNCTION shop_submissions_guard_insert();
+
 CREATE TABLE IF NOT EXISTS submission_reviews (
     id             BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
     submission_id  BIGINT NOT NULL UNIQUE REFERENCES shop_submissions (id),

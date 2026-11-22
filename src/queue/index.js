@@ -44,11 +44,16 @@ function unavailable() {
 }
 
 /**
- * Wrap a store so its operations fail with 503 until `markReady()`.
+ * Wrap a store so its operations fail with 503 until `markReady()`, and so a
+ * storage failure after a healthy boot (database down, connection dropped)
+ * is also a 503 SUBMISSIONS_UNAVAILABLE rather than a generic 500. The store
+ * throws no domain errors of its own (a full queue is a `null` result), so
+ * any rejection is a storage failure; an UnavailableError passes through.
  *
  * @param {Object} inner
+ * @param {Object} logger
  */
-function makeGatedStore(inner) {
+function makeGatedStore(inner, logger) {
     let ready = false;
     const gated = {
         kind: inner.kind,
@@ -59,7 +64,16 @@ function makeGatedStore(inner) {
         close: () => inner.close(),
     };
     for (const method of STORE_METHODS) {
-        gated[method] = (...args) => (ready ? inner[method](...args) : Promise.reject(unavailable()));
+        gated[method] = async (...args) => {
+            if (!ready) throw unavailable();
+            try {
+                return await inner[method](...args);
+            } catch (err) {
+                if (err instanceof UnavailableError) throw err;
+                logger.error({ err, op: method }, 'Submission queue storage failed');
+                throw unavailable();
+            }
+        };
     }
     return gated;
 }
@@ -94,7 +108,7 @@ async function startQueueStore({
     // Without this, an idle client's network error is an unhandled 'error'
     // event that crashes the process.
     pool.on('error', (err) => logger.warn({ err }, 'Postgres pool client error'));
-    const store = makeGatedStore(makePostgresQueueStore(pool));
+    const store = makeGatedStore(makePostgresQueueStore(pool), logger);
 
     let timer = null;
     let closed = false;

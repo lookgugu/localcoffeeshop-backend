@@ -3,7 +3,8 @@
  * (src/queue/postgres-pool.js). No database needed.
  */
 
-const { startQueueStore } = require('../../../src/queue');
+const { startQueueStore, makeGatedStore } = require('../../../src/queue');
+const { UnavailableError } = require('../../../src/usecases/errors');
 const { connectionOptions } = require('../../../src/queue/postgres-pool');
 
 const silent = { info() {}, warn() {}, error() {}, debug() {} };
@@ -97,5 +98,32 @@ describe('connectionOptions (TLS)', () => {
     it('keeps non-TLS query parameters', () => {
         const { connectionString } = connectionOptions('postgresql://u@h/d?sslmode=require&application_name=x', 'PEM');
         expect(new URL(connectionString).searchParams.get('application_name')).toBe('x');
+    });
+});
+
+describe('makeGatedStore — runtime outages', () => {
+    function readyStore(inner) {
+        const store = makeGatedStore({ kind: 'postgres', durable: true, isHealthy: async () => true, close: async () => {}, ...inner }, silent);
+        store.markReady();
+        return store;
+    }
+
+    it('turns a storage error after a healthy boot into 503 SUBMISSIONS_UNAVAILABLE', async () => {
+        const store = readyStore({
+            enqueueSubmission: jest.fn().mockRejectedValue(Object.assign(new Error('connect ECONNREFUSED'), { code: 'ECONNREFUSED' })),
+            reserveKey: jest.fn().mockRejectedValue(new Error('Connection terminated unexpectedly')),
+        });
+        await expect(store.enqueueSubmission({})).rejects.toMatchObject({ name: 'UnavailableError', code: 'SUBMISSIONS_UNAVAILABLE', retryAfterSeconds: 60 });
+        await expect(store.reserveKey({})).rejects.toBeInstanceOf(UnavailableError);
+    });
+
+    it('passes results and existing UnavailableErrors through unchanged', async () => {
+        const own = new UnavailableError('SOMETHING', 'x', 5);
+        const store = readyStore({
+            enqueueSubmission: jest.fn().mockResolvedValue(null),
+            lookupKey: jest.fn().mockRejectedValue(own),
+        });
+        await expect(store.enqueueSubmission({})).resolves.toBeNull();
+        await expect(store.lookupKey('k', 0)).rejects.toBe(own);
     });
 });

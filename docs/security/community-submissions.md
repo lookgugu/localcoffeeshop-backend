@@ -31,7 +31,7 @@ The queue used to live in the SQLite file baked into the image. App Platform rep
 - **Storage selection** (`src/queue/`): with `DATABASE_URL` set, the API uses the Postgres store; otherwise it uses the SQLite store (development and tests). Both implement one interface, covered by one contract suite run against both databases (`tests/integration/queue-store.test.js`). See [ADR-0002](../adr/0002-submission-queue-store.md).
 - **Production gate**: submissions open only with `SUBMISSIONS_ENABLED=true` **and** `DATABASE_URL`. The flag alone logs a warning and stays closed.
 - **Schema** (`migrations/postgres/`, forward-only): applied at boot, one transaction per file, recorded with a SHA-256 in `schema_migrations`; an edited applied file is refused. A session advisory lock serialises concurrent boots. Run manually with `npm run migrate:pg -- status|up`.
-- **Boot never takes the API down**: if Postgres is unreachable or a migration fails, the directory keeps serving, `/health` stays 200 with `data.submissions.queue = "error"`, and every submission gets **503** `SUBMISSIONS_UNAVAILABLE`. The migration is retried every 60 s.
+- **A Postgres outage never takes the API down**: at boot or later. If Postgres is unreachable or a migration fails, the directory keeps serving, `/health` stays 200 with `data.submissions.queue = "error"`, and every submission gets **503** `SUBMISSIONS_UNAVAILABLE`. The migration is retried every 60 s.
 - **TLS**: `sslmode` in the URL is honoured by requiring TLS. Set `DATABASE_CA_CERT` (App Platform: `${db.CA_CERT}`) to verify DigitalOcean's certificate. Verification is never disabled.
 - **Least privilege, enforced by the database**:
 
@@ -40,7 +40,7 @@ The queue used to live in the SQLite file baked into the image. App Platform rep
   | `lcs_app` (the API) | insert and count `shop_submissions`; read/write `idempotency_keys` | update or delete submissions; read or write `submission_reviews` |
   | `lcs_reviewer` (moderation) | read submissions; update **only** `status`; insert into `submission_reviews` | edit submission content; enqueue; touch `idempotency_keys` |
 
-  Triggers make submission content immutable and allow status only `pending → approved|rejected`, whoever runs the update; `submission_reviews` is append-only. Both roles are `NOLOGIN` groups created by the migration (needs `CREATEROLE`, which DigitalOcean's `doadmin` has).
+  Triggers make every submission start as `pending`, keep its content immutable, and allow status only `pending → approved|rejected`, whoever runs the statement; `submission_reviews` is append-only. Both roles are `NOLOGIN` groups created by the migration (needs `CREATEROLE`, which DigitalOcean's `doadmin` has).
 - `/health` reports `data.submissions = { open, storage, durable, queue }`, so a deploy can be checked from a browser.
 
 ### Production setup (operator)

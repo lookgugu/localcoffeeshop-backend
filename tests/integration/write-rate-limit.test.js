@@ -186,7 +186,14 @@ describe('Write rate limit', () => {
     describe('production (trust proxy = 1 hop)', () => {
         beforeEach(async () => {
             // Production defaults submissions OFF; these tests opt in explicitly.
-            await boot({ NODE_ENV: 'production', CORS_ORIGIN: 'https://localcoffeeshop.co', SUBMISSIONS_ENABLED: 'true' });
+            // DATABASE_URL only satisfies the config gate: no Postgres store is
+            // injected, so writes land in the SQLite test db.
+            await boot({
+                NODE_ENV: 'production',
+                CORS_ORIGIN: 'https://localcoffeeshop.co',
+                SUBMISSIONS_ENABLED: 'true',
+                DATABASE_URL: 'postgresql://unused.invalid/test',
+            });
         });
 
         function prodPost(xff) {

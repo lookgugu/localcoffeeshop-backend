@@ -10,6 +10,7 @@
     "test:watch": "jest --watch",
     "test:coverage": "jest --coverage --detectOpenHandles --forceExit",
     "migrate": "node scripts/migrate.js",
+    "migrate:pg": "node scripts/migrate-postgres.js",
     "import:coordinates": "node scripts/import-coordinates.js",
     "geocode:missing": "node scripts/geocode-missing.js",
     "backup": "node scripts/backup-database.js"
@@ -21,6 +22,7 @@
     "express": "^4.18.2",
     "express-rate-limit": "^8.2.0",
     "helmet": "^8.1.0",
+    "pg": "^8.23.1",
     "pino": "^10.1.0",
     "pino-http": "^11.0.0",
     "pino-pretty": "^13.1.2",

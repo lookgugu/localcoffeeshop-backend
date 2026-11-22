@@ -21,6 +21,7 @@ const { mountApiV1 } = require('./routes/api-v1');
 const { mountSeo } = require('./routes/seo');
 const { makeWaitlistService } = require('./waitlist/service');
 const { makeResendProvider } = require('./waitlist/resend-provider');
+const { makeSqliteQueueStore } = require('./queue/sqlite-store');
 
 // body-parser `err.type` → client-facing message. Anything else stays a 500.
 const BODY_PARSER_ERRORS = Object.freeze({
@@ -40,13 +41,16 @@ const BODY_PARSER_ERRORS = Object.freeze({
  * @param {Object} deps.logger Pino-shaped logger
  * @param {Object} deps.metrics Built metrics object from buildMetrics
  * @param {Object} deps.enums Enums module (State, Price)
+ * @param {Object} [deps.queueStore] Submission queue store (src/queue/);
+ *   defaults to the SQLite store on `db`
  * @param {Function} [deps.waitlistFetch] fetch used for the waitlist email
  *   provider (tests inject a fake; defaults to global fetch)
  * @param {Function} [deps.waitlistSleep] retry backoff sleep (tests)
  * @returns {import('express').Application}
  */
-function buildApp({ config, db, cache, logger, metrics, enums, waitlistFetch, waitlistSleep }) {
+function buildApp({ config, db, cache, logger, metrics, enums, queueStore, waitlistFetch, waitlistSleep }) {
     const app = express();
+    const queue = queueStore || Object.assign(makeSqliteQueueStore(db), { ready: true });
 
     if (config.nodeEnv === 'production') {
         // Trust the first proxy hop so req.secure works with X-Forwarded-Proto.
@@ -88,6 +92,7 @@ function buildApp({ config, db, cache, logger, metrics, enums, waitlistFetch, wa
 
     mountApiV1(app, {
         db,
+        queueStore: queue,
         cached,
         searchShopsUseCase,
         nearbyShopsUseCase,

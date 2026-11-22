@@ -71,13 +71,39 @@ describe('loadConfig — submission limits', () => {
 });
 
 describe('loadConfig — submissionsEnabled', () => {
+    const DATABASE_URL = 'postgresql://app@db.example/lcs';
+
     it.each([[undefined], [''], ['1'], ['yes'], ['TRUE '], ['false']])(
-        'production with SUBMISSIONS_ENABLED=%p: only exact "true" (case/space-insensitive) opens',
+        'production with SUBMISSIONS_ENABLED=%p and a DATABASE_URL: only exact "true" (case/space-insensitive) opens',
         (value) => {
-            const env = { NODE_ENV: 'production', ...(value === undefined ? {} : { SUBMISSIONS_ENABLED: value }) };
+            const env = { NODE_ENV: 'production', DATABASE_URL, ...(value === undefined ? {} : { SUBMISSIONS_ENABLED: value }) };
             expect(loadConfig(env).submissionsEnabled).toBe(value === 'TRUE ');
         },
     );
+
+    it('production with SUBMISSIONS_ENABLED=true but no DATABASE_URL stays closed and warns', () => {
+        const config = loadConfig({ NODE_ENV: 'production', SUBMISSIONS_ENABLED: 'true' });
+        expect(config.submissionsEnabled).toBe(false);
+        expect(config.warnings.join('\n')).toMatch(/DATABASE_URL is not set/);
+    });
+
+    it('non-production does not need DATABASE_URL (SQLite queue store)', () => {
+        expect(loadConfig({ NODE_ENV: 'test', SUBMISSIONS_ENABLED: 'true' }).submissionsEnabled).toBe(true);
+    });
+
+    it('exposes queue storage settings', () => {
+        const config = loadConfig({
+            DATABASE_URL,
+            MIGRATION_DATABASE_URL: 'postgresql://admin@db.example/lcs',
+            DATABASE_CA_CERT: 'PEM',
+        });
+        expect(config.queue).toEqual({
+            databaseUrl: DATABASE_URL,
+            migrationDatabaseUrl: 'postgresql://admin@db.example/lcs',
+            caCert: 'PEM',
+        });
+        expect(loadConfig({}).queue.databaseUrl).toBe('');
+    });
 
     it.each([[undefined, true], ['', true], ['true', true], ['false', false], ['0', false], ['off', false], ['no', false]])(
         'non-production with SUBMISSIONS_ENABLED=%p → %p',

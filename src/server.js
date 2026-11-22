@@ -15,6 +15,7 @@ const { buildMetrics } = require('./lib/metrics');
 const { QueryCache } = require('./lib/cache');
 const { buildApp } = require('./app');
 const db = require('./db');
+const { startQueueStore } = require('./queue');
 const enums = require('./enums');
 
 const config = loadConfig(process.env);
@@ -47,13 +48,18 @@ async function main() {
         },
     });
 
-    const app = buildApp({ config, db, cache, logger, metrics, enums });
+    // Never throws: a broken Postgres keeps submissions at 503, not the API down.
+    const queueStore = await startQueueStore({ config, db, logger });
+
+    const app = buildApp({ config, db, cache, logger, metrics, enums, queueStore });
 
     const server = app.listen(config.port, () => {
         logger.info({
             port: config.port,
             nodeEnv: config.nodeEnv,
             dbPath: config.dbPath,
+            submissions: config.submissionsEnabled ? 'open' : 'closed',
+            queueStorage: queueStore.kind,
         }, 'Server started successfully');
     });
 
@@ -62,6 +68,7 @@ async function main() {
         server.close(() => {
             logger.info('HTTP server closed');
         });
+        await queueStore.close().catch((err) => logger.warn({ err }, 'queue store close failed'));
         await db.close();
         logger.info('Graceful shutdown completed');
         process.exit(0);

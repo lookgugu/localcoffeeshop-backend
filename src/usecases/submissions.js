@@ -2,8 +2,8 @@
  * Community Submissions Use Case
  *
  * Anonymous visitors may *propose* a new shop or a change to an existing one.
- * Proposals land in the `shop_submissions` moderation queue with status
- * 'pending'. Nothing here reads from or writes to the published
+ * Proposals land in the `shop_submissions` moderation queue (held by the
+ * queue store, src/queue/) with status 'pending'. Nothing here reads from or writes to the published
  * `coffee_shops` table except the existence check for update proposals —
  * publication is a separate, privileged step that does not exist yet.
  *
@@ -157,13 +157,15 @@ function validateShopProposal(body, enums) {
  * Build the use case that queues a validated proposal.
  *
  * @param {Object} deps
- * @param {Object} deps.db Database module (get, run)
+ * @param {Object} deps.db Published-directory database (get) — only used to
+ *   check that an update proposal targets an existing shop
+ * @param {Object} deps.store Queue store (src/queue/) — holds the queue
  * @param {number} deps.queueMax Maximum number of pending submissions
  * @param {() => number} [deps.now] Epoch-seconds clock (injectable for tests)
  * @returns {(input: {kind: 'create'|'update', targetShopId: number|null, proposal: Object})
  *           => Promise<{submissionId: number}>}
  */
-function makeSubmitShopProposalUseCase({ db, queueMax, now = () => Math.floor(Date.now() / 1000) }) {
+function makeSubmitShopProposalUseCase({ db, store, queueMax, now = () => Math.floor(Date.now() / 1000) }) {
     return async function submitShopProposal({ kind, targetShopId, proposal }) {
         if (kind === 'update') {
             const target = await db.get(
@@ -176,29 +178,19 @@ function makeSubmitShopProposalUseCase({ db, queueMax, now = () => Math.floor(Da
             }
         }
 
-        // Single statement, so the capacity check and the insert are atomic
-        // under SQLite's write lock — concurrent requests cannot overshoot.
-        const { lastID, changes } = await db.run(
-            `INSERT INTO shop_submissions
-                (kind, target_shop_id, name, address, state, price_level,
-                 phone_number, website, description, language_code, status, created_at)
-             SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?
-             WHERE (SELECT COUNT(*) FROM shop_submissions WHERE status = 'pending') < ?`,
-            [
-                kind, targetShopId, proposal.name, proposal.address, proposal.state,
-                proposal.priceLevel, proposal.phoneNumber, proposal.website,
-                proposal.description, proposal.languageCode, now(), queueMax,
-            ],
-            'insert_shop_submission',
-        );
+        // The store checks capacity and inserts atomically (see
+        // src/queue/*-store.js), so concurrent requests cannot overshoot.
+        const submissionId = await store.enqueueSubmission({
+            kind, targetShopId, proposal, now: now(), queueMax,
+        });
 
-        if (changes === 0) {
+        if (submissionId === null) {
             throw new UnavailableError(
                 'SUBMISSION_QUEUE_FULL',
                 'The review queue is full. Please try again later.',
             );
         }
-        return { submissionId: lastID };
+        return { submissionId };
     };
 }
 

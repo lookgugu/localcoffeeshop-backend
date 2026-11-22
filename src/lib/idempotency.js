@@ -15,15 +15,17 @@
  *   - Header present, pending row in cache → another request with this key
  *     is still in flight. Return 409 IDEMPOTENCY_IN_PROGRESS so the client
  *     can decide whether to retry once that one finishes.
- *   - Header present, cache miss → reserve a `pending` row via
- *     `INSERT OR IGNORE`. The unique key on the primary key gives us atomic
- *     mutual exclusion: if `changes === 0`, another request won the race and
- *     this one returns 409. Otherwise call next(); on a 2xx response we
- *     UPDATE the row to `completed`, on non-2xx (or handler error / hangup)
- *     we DELETE the placeholder so the client can retry.
- *   - Lookup throws (DB error before reservation) → fall through to the
- *     handler. The dedup table is bookkeeping; a broken bookkeeping table
- *     must not block production writes.
+ *   - Header present, cache miss → reserve a `pending` row. Reservation is
+ *     one atomic upsert: it inserts, or replaces a row older than the TTL
+ *     (so a key reused after expiry is a fresh request, not a spurious 409).
+ *     If a live row exists, another request won the race → 409. Otherwise
+ *     call next(); on a 2xx response the row becomes `completed`, on non-2xx
+ *     (or handler error / hangup) the placeholder is deleted so the client
+ *     can retry.
+ *   - Storage error during lookup or reservation → 503
+ *     IDEMPOTENCY_UNAVAILABLE, handler NOT run. Dedup storage is the queue's
+ *     own storage, so running the write without it would at best duplicate
+ *     and at worst fail anyway (fail closed).
  *
  * Only 2xx responses are cached. Caching a 5xx would turn a transient
  * upstream failure into a permanent one — every retry with the same key
@@ -31,10 +33,13 @@
  *
  * Cleanup uses a 1% probabilistic sweep on each completion. No cron.
  *
+ * Storage goes through a queue store (src/queue/), SQLite or Postgres.
+ *
  * The middleware is transparent to handlers — they don't know it exists.
  */
 
 const crypto = require('crypto');
+const { UnavailableError } = require('../usecases/errors');
 
 const TTL_SECONDS_DEFAULT = 86400; // 24h
 const SWEEP_PROBABILITY = 0.01; // 1% chance per completed write
@@ -59,7 +64,7 @@ function requestFingerprint(req) {
         .digest('hex');
 }
 
-function withIdempotency({ db, ttlSeconds = TTL_SECONDS_DEFAULT, logger }) {
+function withIdempotency({ store, ttlSeconds = TTL_SECONDS_DEFAULT, logger }) {
     return async function idempotencyMiddleware(req, res, next) {
         const key = req.get('Idempotency-Key');
         if (!key) return next();
@@ -92,12 +97,9 @@ function withIdempotency({ db, ttlSeconds = TTL_SECONDS_DEFAULT, logger }) {
         const fingerprint = requestFingerprint(req);
 
         try {
-            const minCreated = Math.floor(Date.now() / 1000) - ttlSeconds;
-            const existing = await db.get(
-                'SELECT status_code, response, status, request_hash FROM idempotency_keys WHERE key = ? AND created_at > ?',
-                [key, minCreated],
-                'idempotency_lookup',
-            );
+            const now = Math.floor(Date.now() / 1000);
+            const expiredBefore = now - ttlSeconds;
+            const existing = await store.lookupKey(key, expiredBefore);
 
             // Same key, different request: never replay an unrelated
             // response and never run the handler. A NULL fingerprint is a
@@ -114,26 +116,22 @@ function withIdempotency({ db, ttlSeconds = TTL_SECONDS_DEFAULT, logger }) {
                 return _respondInProgress(res);
             }
 
-            // Reserve the key. The PRIMARY KEY (`key`) makes this atomic: if
-            // two concurrent requests race here, exactly one INSERT wins and
-            // the other reports changes === 0.
             const endpoint = `${req.method} ${req.route ? req.route.path : req.path}`;
-            const now = Math.floor(Date.now() / 1000);
-            const reservation = await db.run(
-                `INSERT OR IGNORE INTO idempotency_keys
-                    (key, endpoint, status_code, response, created_at, status, request_hash)
-                 VALUES (?, ?, 0, '', ?, 'pending', ?)`,
-                [key, endpoint, now, fingerprint],
-                'idempotency_reserve',
-            );
-
-            if (reservation.changes === 0) {
+            const reserved = await store.reserveKey({
+                key, endpoint, requestHash: fingerprint, now, expiredBefore,
+            });
+            if (!reserved) {
                 // Race lost: another request with the same key reserved first.
                 return _respondInProgress(res);
             }
         } catch (err) {
-            log.warn({ err, key }, 'idempotency lookup failed; falling through');
-            return next();
+            if (err instanceof UnavailableError) return next(err);
+            log.error({ err }, 'idempotency storage failed; refusing the write');
+            return next(new UnavailableError(
+                'IDEMPOTENCY_UNAVAILABLE',
+                'Submissions are temporarily unavailable. Please try again later.',
+                60,
+            ));
         }
 
         // We hold the reservation. Wrap res.json so we can flip the row to
@@ -142,11 +140,8 @@ function withIdempotency({ db, ttlSeconds = TTL_SECONDS_DEFAULT, logger }) {
         const release = (reason) => {
             if (released) return;
             released = true;
-            db.run(
-                "DELETE FROM idempotency_keys WHERE key = ? AND status = 'pending'",
-                [key],
-                'idempotency_release',
-            ).catch((err) => log.warn({ err, key, reason }, 'idempotency release failed'));
+            store.releaseKey(key)
+                .catch((err) => log.warn({ err, key, reason }, 'idempotency release failed'));
         };
 
         const originalJson = res.json.bind(res);
@@ -156,13 +151,8 @@ function withIdempotency({ db, ttlSeconds = TTL_SECONDS_DEFAULT, logger }) {
             if (isSuccess) {
                 released = true; // we're flipping pending → completed; nothing to release
                 const payload = JSON.stringify(body);
-                db.run(
-                    `UPDATE idempotency_keys
-                     SET status = 'completed', status_code = ?, response = ?
-                     WHERE key = ?`,
-                    [res.statusCode, payload, key],
-                    'idempotency_complete',
-                ).then(() => _maybeSweep(db, ttlSeconds, log)).catch((err) => {
+                store.completeKey(key, res.statusCode, payload)
+                    .then(() => _maybeSweep(store, ttlSeconds, log)).catch((err) => {
                     log.warn({ err, key }, 'idempotency complete failed');
                 });
             } else {
@@ -223,17 +213,12 @@ function _respondKeyReused(res) {
  *
  * @private
  */
-async function _maybeSweep(db, ttlSeconds, logger) {
+async function _maybeSweep(store, ttlSeconds, logger) {
     if (Math.random() > SWEEP_PROBABILITY) return;
     try {
-        const cutoff = Math.floor(Date.now() / 1000) - ttlSeconds;
-        const result = await db.run(
-            'DELETE FROM idempotency_keys WHERE created_at < ?',
-            [cutoff],
-            'idempotency_sweep',
-        );
-        if (result.changes > 0) {
-            logger.info({ deleted: result.changes }, 'idempotency sweep');
+        const deleted = await store.sweepKeys(Math.floor(Date.now() / 1000) - ttlSeconds);
+        if (deleted > 0) {
+            logger.info({ deleted }, 'idempotency sweep');
         }
     } catch (err) {
         logger.warn({ err }, 'idempotency sweep failed');

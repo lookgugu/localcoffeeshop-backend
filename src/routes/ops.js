@@ -2,7 +2,8 @@
  * Ops Routes
  *
  * Three trivial endpoints with shared deps:
- *   GET /health  — DB liveness + process info (returns 503 if DB is down)
+ *   GET /health  — DB liveness + process info (returns 503 if DB is down),
+ *                  plus submission-queue status (informational)
  *   GET /stats   — aggregate counts by price level
  *   GET /config  — public client configuration
  *
@@ -13,7 +14,31 @@
 const { asyncHandler } = require('../lib/async-handler');
 const { sendSuccess } = require('../lib/responses');
 
-function mountOps(router, { db, config, logger, packageJson }) {
+// App Platform's probe times out after 3 s. A slow queue database must not
+// push /health past that (and get the instance restarted), so its check is
+// capped well below and counts as an error when it runs over.
+const QUEUE_HEALTH_TIMEOUT_MS = 500;
+
+function withTimeout(promise, ms, fallback) {
+    let timer;
+    const timeout = new Promise((resolve) => {
+        timer = setTimeout(() => resolve(fallback), ms);
+    });
+    return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
+}
+
+async function submissionsHealth(queueStore, config, timeoutMs = QUEUE_HEALTH_TIMEOUT_MS) {
+    if (!queueStore) return { open: false, storage: 'none', queue: 'not_configured' };
+    const queueOk = await withTimeout(queueStore.isHealthy().catch(() => false), timeoutMs, false);
+    return {
+        open: Boolean(config.submissionsEnabled && queueOk),
+        storage: queueStore.kind,
+        durable: queueStore.durable,
+        queue: queueOk ? 'ok' : 'error',
+    };
+}
+
+function mountOps(router, { db, queueStore, config, logger, packageJson }) {
     router.get('/stats', asyncHandler(async (req, res) => {
         const row = await db.get(`
             SELECT
@@ -47,6 +72,9 @@ function mountOps(router, { db, config, logger, packageJson }) {
                 unit: 'MB',
             },
             database: isDbHealthy ? 'connected' : 'error',
+            // Informational: a queue outage closes submissions (503) but the
+            // directory still serves, so it does not fail the health check.
+            submissions: await submissionsHealth(queueStore, config),
         };
 
         if (!isDbHealthy) {
@@ -81,4 +109,4 @@ function mountOps(router, { db, config, logger, packageJson }) {
     });
 }
 
-module.exports = { mountOps };
+module.exports = { mountOps, submissionsHealth };

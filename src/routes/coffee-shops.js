@@ -77,10 +77,11 @@ function sendAccepted(res, { submissionId }, { kind, targetShopId, proposal }) {
 }
 
 function mountCoffeeShops(router, deps) {
-    const { db, logger, enums, config } = deps;
-    const idempotent = withIdempotency({ db, logger });
+    const { db, queueStore, logger, enums, config } = deps;
+    const idempotent = withIdempotency({ store: queueStore, logger });
     const submitShopProposal = makeSubmitShopProposalUseCase({
         db,
+        store: queueStore,
         queueMax: config.submissionQueueMax,
     });
 

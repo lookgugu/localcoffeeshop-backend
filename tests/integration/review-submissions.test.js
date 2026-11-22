@@ -142,11 +142,11 @@ describe('scripts/review-submissions.js', () => {
     });
 
     describe('database selection', () => {
-        it('requires --db: no default database, nothing created', () => {
+        it('requires --db or --postgres: no default database, nothing created', () => {
             const cwd = fs.mkdtempSync(path.join(tmp, 'cwd-'));
             const res = cli(['list'], { cwd });
             expect(res.status).toBe(2);
-            expect(res.stderr).toMatch(/--db is required/);
+            expect(res.stderr).toMatch(/--db <sqlite file> or --postgres is required/);
             expect(res.stdout).toBe('');
             expect(fs.readdirSync(cwd)).toEqual([]);
         });

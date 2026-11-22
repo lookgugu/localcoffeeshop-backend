@@ -20,7 +20,7 @@ Before this change, `POST /api/v1/coffee-shops` inserted straight into the publi
 | Kill switch | `SUBMISSIONS_ENABLED`. **Production is closed by default (503 `SUBMISSIONS_DISABLED`) and opens only on the exact value `true` with `DATABASE_URL` also set** (the durable queue; see below). Development and test default to open, and there `false/0/off/no` closes it. |
 | Logging | Each accepted proposal logs `event: shop_submission_queued` with submissionId, kind and targetShopId only. No user-supplied content is logged. |
 
-There is **deliberately no moderation, publication or admin endpoint**. No browser secret was added. Nothing in the app reads from `shop_submissions`. A private, local operator CLI for recording moderation decisions (never publication) was added later; see [submission-review-cli.md](submission-review-cli.md).
+There is **deliberately no moderation, publication or admin endpoint**. No browser secret was added. Nothing in the app reads from `shop_submissions`. A private operator CLI for recording moderation decisions (never publication) was added later. It works on local SQLite copies and, as an `lcs_reviewer` login, on the production Postgres queue; see [submission-review-cli.md](submission-review-cli.md).
 
 ## Durable queue (Postgres)
 
@@ -50,6 +50,7 @@ The queue used to live in the SQLite file baked into the image. App Platform rep
 3. App environment variables (encrypted): `DATABASE_URL` = the `lcs_api` connection string, `MIGRATION_DATABASE_URL` = the `doadmin` connection string, `DATABASE_CA_CERT` = `${<db>.CA_CERT}`. Leave `SUBMISSIONS_ENABLED` unset.
 4. Deploy. The boot-time migration (as `doadmin`) creates the tables and the `lcs_app` / `lcs_reviewer` roles.
 5. As `doadmin`: `GRANT lcs_app TO lcs_api; GRANT lcs_reviewer TO lcs_review;` No restart is needed.
+   The reviewer's machine must be in the cluster's trusted sources. Reviewers connect with `REVIEW_DATABASE_URL` = the `lcs_review` connection string (never `lcs_api` or `doadmin`; the CLI refuses both) and `REVIEW_DATABASE_CA_CERT` = the cluster's CA certificate. See [submission-review-cli.md](submission-review-cli.md#postgres-the-production-queue).
 6. Check `GET https://api.localcoffeeshop.co/api/v1/health`: `submissions.storage` must be `postgres` and `submissions.queue` must be `ok`. `queue` reports `error` if Postgres is unreachable **or** the API's login lacks the `lcs_app` grants. `open` stays `false` until step 7.
 7. Only when the gate below is met, set `SUBMISSIONS_ENABLED=true`.
 
@@ -60,7 +61,7 @@ The queue used to live in the SQLite file baked into the image. App Platform rep
 | Durable storage: proposals, idempotency and review audit together, atomic capacity | **Done in code** (this change); needs the database provisioned (setup above) |
 | Idempotency edge cases B-01 (expired-key 409) and B-02b (fail-open on storage error) | **Fixed** (this change) |
 | Least-privilege identities: the public app cannot decide or publish | **Done in schema**; needs the login users and grants (setup step 2) |
-| Review tooling on the durable store | **Open**: `scripts/review-submissions.js` still works only on SQLite copies; porting it to Postgres is the next change |
+| Review tooling on the durable store | **Done in code**: `scripts/review-submissions.js --postgres` (backend #20); needs the `lcs_review` login from the setup above |
 | Confirmed reviewer/owner, cadence, retention and privacy policy | **Open**: a product-owner decision; record it here |
 | Real App Platform `X-Forwarded-For` hop behaviour verified against `trust proxy = 1` | **Open**: needs a check against production |
 | Restore drill (backup and restore of the queue database) | **Open** |
@@ -93,6 +94,7 @@ None of these migrations has a `down` section. `npm run migrate -- down` refuses
 
 - `tests/integration/queue-store.test.js`: one contract suite run against real SQLite and real Postgres (the latter as `lcs_app`): field storage, capacity counting only pending rows, 25 concurrent enqueues against a cap of 5 (fails without the advisory lock), atomic reservation, B-01 expired-key replacement, release/complete/sweep scope.
 - `tests/integration/postgres-queue.test.js`: migration runner (fresh, re-run, edited file refused, failed file rolled back, concurrent runners); `lcs_app` and `lcs_reviewer` grants; immutability and append-only triggers; CHECK constraints; `POST /coffee-shops` end to end on Postgres with replay and 422; boot with an unreachable Postgres resolves and answers 503.
+- `tests/integration/review-submissions-postgres.test.js`: the review CLI as a subprocess with real login roles: refuses the owner/superuser and `lcs_app` logins, never falls back to `DATABASE_URL`, digest parity with SQLite, dry runs write nothing, stale and non-pending decisions refused, rollback when the audit insert or the status update fails, 8 racing processes with exactly one decision landing, and the reviewer login unable to edit content or rewrite the audit.
 - Postgres suites run when `PG_TEST_DATABASE_URL` is set (each creates and drops its own database). CI runs them against a `postgres:16` service with `REQUIRE_PG_TESTS=1`, so a missing database fails the run instead of skipping.
 - `tests/integration/submissions.test.js`: 202 pending for POST/PUT, published rows deep-equal before and after every test, frontend payload shape, rejection of invalid lengths/types/enums/URLs/ids with nothing stored in either table.
 - `tests/unit/usecases/submissions.test.js`: field-by-field validation, `parseShopId`, and the capacity-checked INSERT.
@@ -111,7 +113,7 @@ Lock-only, semver-compatible, limited to the request path: express 4.22.3, body-
 
 ## Known limitations and follow-ups
 
-- With `DATABASE_URL` set the queue is durable (see above). There is still no review UI or publication path, and the local review CLI records decisions on SQLite copies only.
+- With `DATABASE_URL` set the queue is durable (see above). Decisions are recorded with the operator CLI (`--postgres`); there is still no review UI or publication path.
 - Rate limiting is per IP. A distributed attacker can still fill the queue up to the cap, after which they hit 503. `trust proxy = 1` assumes exactly one proxy hop at DO; check this against real DO headers before relying on per-client fairness.
 - **B-01 (fixed 2026-11-22):** a key reused more than 24h after its first use used to get 409 `IDEMPOTENCY_IN_PROGRESS` until a probabilistic sweep removed the expired row. Reservation is now one upsert that replaces an expired row atomically, tested against real SQLite and Postgres.
 - **Deferred baseline items B-02 (pre-existing, not fixed here):** (a) the non-API 404 handler returns 500 because `src/public/html/404.html` is missing. (b) Fixed 2026-11-22: a storage error in the idempotency lookup or reservation now refuses the write with 503 `IDEMPOTENCY_UNAVAILABLE` instead of running it unprotected. (c) The `Dockerfile` doesn't set `DB_PATH`, so container runs without the app-spec env default to `./coffee_shops.db`. (d) Jest `collectCoverageFrom` covers only `src/server.js` and `src/db.js`.

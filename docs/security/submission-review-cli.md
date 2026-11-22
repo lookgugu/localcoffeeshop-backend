@@ -1,5 +1,7 @@
 # Private submission review CLI (local SQLite operator tooling)
 
+> **2026-11-22:** production's queue now lives in Postgres (see [community-submissions.md](community-submissions.md#durable-queue-postgres)). This tool still reads and writes SQLite copies only; porting it to the Postgres queue (as the `lcs_reviewer` role) is the next change and a release gate.
+
 Status as of 2026-10-17, branch `feat/submission-review-local-20261017`, base `a41e136`.
 
 `scripts/review-submissions.js` lets an operator **list, inspect and record a moderation decision** on rows in the `shop_submissions` queue (see [community-submissions.md](community-submissions.md)). It is a local command-line tool. Nothing in `src/` imports it, it has no HTTP surface, and a test enforces this (`scope guard` in `tests/integration/review-submissions.test.js`).

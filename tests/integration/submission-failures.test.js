@@ -189,8 +189,14 @@ describe('Community submissions — failure paths', () => {
             expect((await request(baseURL).post('/api/v1/coffee-shops').send(payload())).status).toBe(202);
         });
 
-        describe('production fails closed (ephemeral queue — see docs/security/community-submissions.md)', () => {
-            const prod = { NODE_ENV: 'production', CORS_ORIGIN: 'https://localcoffeeshop.co' };
+        describe('production fails closed (durable queue required — see docs/security/community-submissions.md)', () => {
+            // DATABASE_URL only satisfies the config gate here: the test server
+            // injects no Postgres store, so writes still land in the SQLite test db.
+            const prod = {
+                NODE_ENV: 'production',
+                CORS_ORIGIN: 'https://localcoffeeshop.co',
+                DATABASE_URL: 'postgresql://unused.invalid/test',
+            };
             const prodPost = () => request(baseURL)
                 .post('/api/v1/coffee-shops').set('X-Forwarded-Proto', 'https').send(payload());
 
@@ -208,6 +214,15 @@ describe('Community submissions — failure paths', () => {
             it('only an explicit SUBMISSIONS_ENABLED=true opens the queue', async () => {
                 await boot({ ...prod, SUBMISSIONS_ENABLED: 'true' });
                 expect((await prodPost()).status).toBe(202);
+            });
+
+            it('SUBMISSIONS_ENABLED=true without DATABASE_URL stays closed (ephemeral SQLite queue)', async () => {
+                const { DATABASE_URL, ...noDatabase } = prod;
+                await boot({ ...noDatabase, DATABASE_URL: '', SUBMISSIONS_ENABLED: 'true' });
+                const res = await prodPost();
+                expect(res.status).toBe(503);
+                expect(res.body.error.code).toBe('SUBMISSIONS_DISABLED');
+                expect(await queryAll(db, 'SELECT id FROM shop_submissions')).toHaveLength(0);
             });
         });
     });

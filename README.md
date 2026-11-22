@@ -120,6 +120,17 @@ npm run backup
 sqlite3 data/coffee_shops.db
 ```
 
+### Submission queue (PostgreSQL)
+
+Community submissions, their review audit and idempotency keys can live in PostgreSQL so they survive deploys. Set `DATABASE_URL` (plus `MIGRATION_DATABASE_URL` and `DATABASE_CA_CERT` in production); the API applies `migrations/postgres/` at boot. Without it, the queue uses the SQLite file, which is fine for development. Production opens submissions only with both `DATABASE_URL` and `SUBMISSIONS_ENABLED=true`.
+
+```bash
+npm run migrate:pg -- status   # or: up
+PG_TEST_DATABASE_URL=postgresql://postgres@localhost:5432/postgres npm test   # include the Postgres suites
+```
+
+See `docs/security/community-submissions.md` and `docs/adr/0002-submission-queue-store.md`.
+
 ## Security
 
 - **Rate Limiting**: 100 requests per 15 minutes per IP; writes additionally 10 per hour per IP

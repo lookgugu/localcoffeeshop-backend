@@ -14,27 +14,57 @@ Before this change, `POST /api/v1/coffee-shops` inserted straight into the publi
 | PUT | A strict id check (`^[1-9][0-9]{0,9}$`): `12abc`, `1e3` and `01` are rejected with 400. The target must exist (400 otherwise, the same as before). The request is queued as `kind='update'` and the live row is left alone. |
 | Validation | Name ≤200, address ≤300, phone ≤32 (digits, spaces and `+().-`), website ≤300 (absolute http/https, no credentials), description ≤1000 (newlines allowed, other control characters rejected), price level must be in the enum, state must be a US code, languageCode must be a BCP-47 tag ≤16. Unknown fields, including the client-generated `id`, are ignored. The table's CHECK constraints repeat these bounds. |
 | Write rate limit | One per-IP budget covers every `POST`/`PUT`/`PATCH`/`DELETE` under `/api/`: the v1 router, the legacy `/api/*` 301 alias, and case or trailing-slash variants. Default is 10 per hour (`WRITE_RATE_LIMIT_MAX`, `WRITE_RATE_LIMIT_WINDOW_MS`). Over the limit you get **429** with `Retry-After` and `error.code = 'RATE_LIMITED'`. The limiter runs **before the JSON body parser**, validation and idempotency, so malformed or oversized bodies, invalid requests and rotated `Idempotency-Key` values all spend the budget. The key is `req.ip`, which follows `X-Forwarded-For` only through `trust proxy = 1` in production. `X-Real-IP`, `DO-Connecting-IP`, `CF-Connecting-IP`, `True-Client-IP`, `Forwarded`, and the forged left-most XFF entries are all ignored. |
-| Queue bound | A single atomic `INSERT … SELECT … WHERE (pending count) < SUBMISSION_QUEUE_MAX` (default 500). When the queue is full: **503** `SUBMISSION_QUEUE_FULL` plus `Retry-After`. Reviewed rows don't count toward the cap. |
-| Idempotency | Order per route: kill switch → validate → idempotency → handler. Invalid requests never reserve a key. Keys must match `[A-Za-z0-9._:-]{1,128}`, otherwise 400 `IDEMPOTENCY_KEY_INVALID`. Each reservation stores a SHA-256 of method, route, params and body. Reusing a key for a different request gives **422** `IDEMPOTENCY_KEY_REUSED`: the stored response is not replayed and the handler does not run. **Legacy rows with a NULL fingerprint fail closed (422)**, so a pre-moderation "shop created" response is never replayed. Non-2xx outcomes (400, 503, 500) release the key. |
+| Queue bound | An atomic `INSERT … SELECT … WHERE (pending count) < SUBMISSION_QUEUE_MAX` (default 500). On Postgres it runs under a transaction-scoped advisory lock, because Postgres has no database-wide write lock to make the count-then-insert atomic. When the queue is full: **503** `SUBMISSION_QUEUE_FULL` plus `Retry-After`. Reviewed rows don't count toward the cap. |
+| Idempotency | Order per route: kill switch → validate → idempotency → handler. Invalid requests never reserve a key. Keys must match `[A-Za-z0-9._:-]{1,128}`, otherwise 400 `IDEMPOTENCY_KEY_INVALID`. Each reservation stores a SHA-256 of method, route, params and body. Reusing a key for a different request gives **422** `IDEMPOTENCY_KEY_REUSED`: the stored response is not replayed and the handler does not run. **Legacy rows with a NULL fingerprint fail closed (422)**, so a pre-moderation "shop created" response is never replayed. Non-2xx outcomes (400, 503, 500) release the key. A key older than the 24h TTL is replaced atomically on reuse (fixes B-01). If idempotency storage fails, the write is refused with **503** `IDEMPOTENCY_UNAVAILABLE` and the handler does not run (fixes B-02b). |
 | Errors | Malformed JSON returns 400 and an oversized body returns 413, both in the standard envelope (they used to be 500). |
-| Kill switch | `SUBMISSIONS_ENABLED`. **Production is closed by default (503 `SUBMISSIONS_DISABLED`) and opens only on the exact value `true`.** Development and test default to open, and there `false/0/off/no` closes it. |
+| Kill switch | `SUBMISSIONS_ENABLED`. **Production is closed by default (503 `SUBMISSIONS_DISABLED`) and opens only on the exact value `true` with `DATABASE_URL` also set** (the durable queue; see below). Development and test default to open, and there `false/0/off/no` closes it. |
 | Logging | Each accepted proposal logs `event: shop_submission_queued` with submissionId, kind and targetShopId only. No user-supplied content is logged. |
 
 There is **deliberately no moderation, publication or admin endpoint**. No browser secret was added. Nothing in the app reads from `shop_submissions`. A private, local operator CLI for recording moderation decisions (never publication) was added later; see [submission-review-cli.md](submission-review-cli.md).
 
-## Release blocker (needs an operator decision)
+## Durable queue (Postgres)
 
-DigitalOcean app `bc7a8c43-…` runs one instance. It serves the SQLite file baked into the image, on an ephemeral filesystem, and auto-deploys from `main`. As a result:
+Status as of 2026-11-22, branch `feat/durable-submission-queue`.
 
-1. **Every queued submission is lost on each deploy, restart or instance replacement.** The queue is not durable, and no config flag can make it durable.
-2. **No publication path exists in this repository, and reviewer ownership is not documented here.** A local review CLI ([submission-review-cli.md](submission-review-cli.md)) can record decisions on a SQLite copy, but it does not make the queue durable and does not identify an owner. Whether a reviewer exists outside the repository is unknown; it must be confirmed and recorded before opening the queue.
+The queue used to live in the SQLite file baked into the image. App Platform replaces that file on every deploy, restart or instance replacement, so queued proposals would have been lost. The queue, its review audit and the idempotency keys now live in Postgres, all together. The published directory (`coffee_shops`) stays in SQLite.
 
-Production therefore ships with submissions **closed**. While the gate below is unmet, community proposals in production get an honest 503 "temporarily closed" instead of a 202 that would later be silently dropped. Set `SUBMISSIONS_ENABLED=true` only after **both** of these are true:
+- **Storage selection** (`src/queue/`): with `DATABASE_URL` set, the API uses the Postgres store; otherwise it uses the SQLite store (development and tests). Both implement one interface, covered by one contract suite run against both databases (`tests/integration/queue-store.test.js`). See [ADR-0002](../adr/0002-submission-queue-store.md).
+- **Production gate**: submissions open only with `SUBMISSIONS_ENABLED=true` **and** `DATABASE_URL`. The flag alone logs a warning and stays closed.
+- **Schema** (`migrations/postgres/`, forward-only): applied at boot, one transaction per file, recorded with a SHA-256 in `schema_migrations`; an edited applied file is refused. A session advisory lock serialises concurrent boots. Run manually with `npm run migrate:pg -- status|up`.
+- **Boot never takes the API down**: if Postgres is unreachable or a migration fails, the directory keeps serving, `/health` stays 200 with `data.submissions.queue = "error"`, and every submission gets **503** `SUBMISSIONS_UNAVAILABLE`. The migration is retried every 60 s.
+- **TLS**: `sslmode` in the URL is honoured by requiring TLS. Set `DATABASE_CA_CERT` (App Platform: `${db.CA_CERT}`) to verify DigitalOcean's certificate. Verification is never disabled.
+- **Least privilege, enforced by the database**:
 
-- **Durable storage**: the queue lives somewhere that survives deploys, such as DO Managed Postgres, a persistent volume, or an external queue. This is an infrastructure change and is out of scope here.
-- **Confirmed, documented reviewer ownership** (currently unknown) and a documented review and publish procedure, including who exports or deletes pending rows and how often.
+  | Role | Can | Cannot |
+  |---|---|---|
+  | `lcs_app` (the API) | insert and count `shop_submissions`; read/write `idempotency_keys` | update or delete submissions; read or write `submission_reviews` |
+  | `lcs_reviewer` (moderation) | read submissions; update **only** `status`; insert into `submission_reviews` | edit submission content; enqueue; touch `idempotency_keys` |
 
-Accepting the risk instead ("best-effort queue, losses OK") is a product-owner decision. If that is the choice, record it explicitly before flipping the flag. The rate limiter's memory store is also per-process and resets on restart, which is acceptable with one instance.
+  Triggers make submission content immutable and allow status only `pending → approved|rejected`, whoever runs the update; `submission_reviews` is append-only. Both roles are `NOLOGIN` groups created by the migration (needs `CREATEROLE`, which DigitalOcean's `doadmin` has).
+- `/health` reports `data.submissions = { open, storage, durable, queue }`, so a deploy can be checked from a browser.
+
+### Production setup (operator)
+
+1. Create a DigitalOcean Managed PostgreSQL cluster (16) in the app's region, or reuse one, and add it to the app as a database component.
+2. In the cluster, create two login users, for example `lcs_api` (the API) and `lcs_review` (moderation).
+3. App environment variables (encrypted): `DATABASE_URL` = the `lcs_api` connection string, `MIGRATION_DATABASE_URL` = the `doadmin` connection string, `DATABASE_CA_CERT` = `${<db>.CA_CERT}`. Leave `SUBMISSIONS_ENABLED` unset.
+4. Deploy. The boot-time migration (as `doadmin`) creates the tables and the `lcs_app` / `lcs_reviewer` roles.
+5. As `doadmin`: `GRANT lcs_app TO lcs_api; GRANT lcs_reviewer TO lcs_review;` No restart is needed.
+6. Check `GET https://api.localcoffeeshop.co/api/v1/health`: `submissions.storage` must be `postgres` and `submissions.queue` must be `ok`. `queue` reports `error` if Postgres is unreachable **or** the API's login lacks the `lcs_app` grants. `open` stays `false` until step 7.
+7. Only when the gate below is met, set `SUBMISSIONS_ENABLED=true`.
+
+### Release gate before `SUBMISSIONS_ENABLED=true`
+
+| Gate | Status |
+|---|---|
+| Durable storage: proposals, idempotency and review audit together, atomic capacity | **Done in code** (this change); needs the database provisioned (setup above) |
+| Idempotency edge cases B-01 (expired-key 409) and B-02b (fail-open on storage error) | **Fixed** (this change) |
+| Least-privilege identities: the public app cannot decide or publish | **Done in schema**; needs the login users and grants (setup step 2) |
+| Review tooling on the durable store | **Open**: `scripts/review-submissions.js` still works only on SQLite copies; porting it to Postgres is the next change |
+| Confirmed reviewer/owner, cadence, retention and privacy policy | **Open**: a product-owner decision; record it here |
+| Real App Platform `X-Forwarded-For` hop behaviour verified against `trust proxy = 1` | **Open**: needs a check against production |
+| Restore drill (backup and restore of the queue database) | **Open** |
+| Publication path | Still a separate, human-reviewed change (for example a data PR); not built |
 
 ## Deploy, migration and rollback
 
@@ -46,7 +76,7 @@ Migrations are additive and **forward-only**. They run automatically at boot (`n
 
 None of these migrations has a `down` section. `npm run migrate -- down` refuses them ("No down migration found", non-zero exit) and changes nothing: the ledger, queued proposals, stored fingerprints and review audit rows all stay as they were, and the next `up` is a no-op. All three objects are inert to code that doesn't reference them, so no schema rollback is ever needed. Never run migrations against the tracked `data/coffee_shops.db`.
 
-**Deploy:** merge to `main`, which auto-deploys. Leave `SUBMISSIONS_ENABLED` unset in the app spec. Afterwards, check (read-only) that `GET /api/v1/health` returns 200. Do **not** test the write path in production. An invalid `SUBMISSION_QUEUE_MAX`, `WRITE_RATE_LIMIT_MAX` or `WRITE_RATE_LIMIT_WINDOW_MS` makes the boot fail with an error naming the variable. Allowed values: queue 0–100000 (0 accepts nothing), write max 1–10000, window 1000–86400000 ms. Unset or empty means the default.
+**Deploy:** merge to `main`, which auto-deploys. Leave `SUBMISSIONS_ENABLED` unset in the app spec until the release gate above is met. Afterwards, check (read-only) that `GET /api/v1/health` returns 200. Do **not** test the write path in production. An invalid `SUBMISSION_QUEUE_MAX`, `WRITE_RATE_LIMIT_MAX` or `WRITE_RATE_LIMIT_WINDOW_MS` makes the boot fail with an error naming the variable. Allowed values: queue 0–100000 (0 accepts nothing), write max 1–10000, window 1000–86400000 ms. Unset or empty means the default.
 
 **Rollback: never restore pre-security code with writes open.** The verified baseline `ee3e8bc` performs unauthenticated `INSERT`/`UPDATE` on the published `coffee_shops` table, has no write rate limit, and **ignores `SUBMISSIONS_ENABLED`**. Treat any older build with equivalent direct-write handlers the same way. In order of preference:
 
@@ -59,8 +89,11 @@ None of these migrations has a `down` section. `npm run migrate -- down` refuses
    The simplest safe rule is case-insensitive: block `POST`/`PUT` whose path equals, or starts with `/` after, `/api/v1/coffee-shops` or `/api/coffee-shops`. Confirm the block from outside on the base path, a descendant and a variant, without sending a real write (for example, an invalid empty body), before the older build goes live. Keep the block until this change is redeployed. A plain `git revert` plus auto-deploy is **not** an acceptable rollback.
 3. Schema: do nothing. The forward-only table and column stay in place and are harmless to older code. Older code's `idempotency_keys` INSERT names its columns, so a nullable `request_hash` doesn't break it.
 
-## Tests (`npm test`: 15 suites, 309 tests)
+## Tests
 
+- `tests/integration/queue-store.test.js`: one contract suite run against real SQLite and real Postgres (the latter as `lcs_app`): field storage, capacity counting only pending rows, 25 concurrent enqueues against a cap of 5 (fails without the advisory lock), atomic reservation, B-01 expired-key replacement, release/complete/sweep scope.
+- `tests/integration/postgres-queue.test.js`: migration runner (fresh, re-run, edited file refused, failed file rolled back, concurrent runners); `lcs_app` and `lcs_reviewer` grants; immutability and append-only triggers; CHECK constraints; `POST /coffee-shops` end to end on Postgres with replay and 422; boot with an unreachable Postgres resolves and answers 503.
+- Postgres suites run when `PG_TEST_DATABASE_URL` is set (each creates and drops its own database). CI runs them against a `postgres:16` service with `REQUIRE_PG_TESTS=1`, so a missing database fails the run instead of skipping.
 - `tests/integration/submissions.test.js`: 202 pending for POST/PUT, published rows deep-equal before and after every test, frontend payload shape, rejection of invalid lengths/types/enums/URLs/ids with nothing stored in either table.
 - `tests/unit/usecases/submissions.test.js`: field-by-field validation, `parseShopId`, and the capacity-checked INSERT.
 - `tests/integration/write-rate-limit.test.js`: 429 + `Retry-After`; a shared budget across POST/PUT, case and trailing-slash variants and the legacy alias; spoofed forwarding headers; rotated keys; invalid, malformed and oversized bodies spend budget; production `trust proxy` keying; reads and preflights not counted.
@@ -78,8 +111,8 @@ Lock-only, semver-compatible, limited to the request path: express 4.22.3, body-
 
 ## Known limitations and follow-ups
 
-- The queue is ephemeral (see the release blocker above), and there is no review UI or publication path. The local review CLI records decisions only.
+- With `DATABASE_URL` set the queue is durable (see above). There is still no review UI or publication path, and the local review CLI records decisions on SQLite copies only.
 - Rate limiting is per IP. A distributed attacker can still fill the queue up to the cap, after which they hit 503. `trust proxy = 1` assumes exactly one proxy hop at DO; check this against real DO headers before relying on per-client fairness.
-- **Deferred baseline defect B-01 (pre-dates this change, not fixed here):** expired `idempotency_keys` rows are only removed by a 1% probabilistic sweep. The lookup ignores rows older than the TTL (`created_at > now - 86400`), but the reservation `INSERT OR IGNORE` still collides with the expired row's primary key and returns `changes === 0`. The middleware reports that as a lost race, so reusing a key more than 24h after its first use gets **409 `IDEMPOTENCY_IN_PROGRESS`** until a sweep happens to run. Impact: availability for that key only, with no data exposure or bypass. The frontend uses a fresh UUID per submit, so it doesn't hit this. Suggested fix: `DELETE FROM idempotency_keys WHERE key = ? AND created_at <= ?` before reserving, with a real-SQLite regression test.
-- **Deferred baseline items B-02 (pre-existing, not fixed here):** (a) the non-API 404 handler returns 500 because `src/public/html/404.html` is missing. (b) If the idempotency lookup or reservation fails with a storage error, the request falls through and is executed (fail-open); the worst case is now a duplicate *pending* row, bounded by the queue cap and the write limit. (c) The `Dockerfile` doesn't set `DB_PATH`, so container runs without the app-spec env default to `./coffee_shops.db`. (d) Jest `collectCoverageFrom` covers only `src/server.js` and `src/db.js`.
+- **B-01 (fixed 2026-11-22):** a key reused more than 24h after its first use used to get 409 `IDEMPOTENCY_IN_PROGRESS` until a probabilistic sweep removed the expired row. Reservation is now one upsert that replaces an expired row atomically, tested against real SQLite and Postgres.
+- **Deferred baseline items B-02 (pre-existing, not fixed here):** (a) the non-API 404 handler returns 500 because `src/public/html/404.html` is missing. (b) Fixed 2026-11-22: a storage error in the idempotency lookup or reservation now refuses the write with 503 `IDEMPOTENCY_UNAVAILABLE` instead of running it unprotected. (c) The `Dockerfile` doesn't set `DB_PATH`, so container runs without the app-spec env default to `./coffee_shops.db`. (d) Jest `collectCoverageFrom` covers only `src/server.js` and `src/db.js`.
 - Frontend: companion PR #49 (separate) changes the two success messages to "pending review". The frontend's update tab has never loaded shop ids (`allCoffeeShops` is never filled), so PUT proposals from the UI may not be reachable today.

@@ -42,13 +42,21 @@ function loadConfig(env = process.env) {
         frontendUrl: env.FRONTEND_URL || '',
         // Community submissions (pending moderation queue; see
         // docs/security/community-submissions.md).
-        // Production fails closed: the queue lives in the baked, ephemeral
-        // SQLite file, so it opens only on an explicit SUBMISSIONS_ENABLED=true
-        // after the durability/moderation-ownership gate in
-        // docs/security/community-submissions.md. Elsewhere it defaults open.
+        // Production fails closed: submissions open only on an explicit
+        // SUBMISSIONS_ENABLED=true AND a durable Postgres queue (DATABASE_URL).
+        // The image's SQLite file is replaced on every deploy, so a queue
+        // there would silently lose proposals. Elsewhere it defaults open.
         submissionsEnabled: nodeEnv === 'production'
-            ? String(env.SUBMISSIONS_ENABLED || '').trim().toLowerCase() === 'true'
+            ? String(env.SUBMISSIONS_ENABLED || '').trim().toLowerCase() === 'true' && Boolean(env.DATABASE_URL)
             : !['false', '0', 'off', 'no'].includes(String(env.SUBMISSIONS_ENABLED || '').trim().toLowerCase()),
+        // Queue storage (src/queue/). Unset → SQLite store (dev/tests).
+        // MIGRATION_DATABASE_URL lets schema migrations run as a more
+        // privileged login than the app's own (lcs_app) user.
+        queue: Object.freeze({
+            databaseUrl: env.DATABASE_URL || '',
+            migrationDatabaseUrl: env.MIGRATION_DATABASE_URL || '',
+            caCert: env.DATABASE_CA_CERT || '',
+        }),
         // 0 is valid and means "accept nothing" (every submission → 503
         // SUBMISSION_QUEUE_FULL).
         submissionQueueMax: boundedInt(env, 'SUBMISSION_QUEUE_MAX', { min: 0, max: 100000, fallback: 500 }),
@@ -79,8 +87,11 @@ function loadConfig(env = process.env) {
         if (!env.METRICS_AUTH_TOKEN) {
             config.recommendations.push('METRICS_AUTH_TOKEN not set - /metrics endpoint will be disabled');
         }
-        if (!config.submissionsEnabled) {
-            config.recommendations.push('SUBMISSIONS_ENABLED is not "true" - community submissions return 503 (queue storage is ephemeral)');
+        const submissionsRequested = String(env.SUBMISSIONS_ENABLED || '').trim().toLowerCase() === 'true';
+        if (submissionsRequested && !env.DATABASE_URL) {
+            config.warnings.push('SUBMISSIONS_ENABLED=true but DATABASE_URL is not set - community submissions stay closed (503) until the Postgres queue is configured');
+        } else if (!config.submissionsEnabled) {
+            config.recommendations.push('SUBMISSIONS_ENABLED is not "true" - community submissions return 503');
         }
         if (!env.CORS_ORIGIN) {
             config.recommendations.push('CORS_ORIGIN not set - defaulting to same-origin only');

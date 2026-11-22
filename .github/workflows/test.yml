@@ -8,6 +8,20 @@ jobs:
   test:
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    services:
+      # Throwaway Postgres for the submission-queue suites
+      # (tests/helpers/pgTestDb.js). Never a real database.
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -18,5 +32,8 @@ jobs:
       - run: npm test
         env:
           TMPDIR: ${{ runner.temp }}
+          PG_TEST_DATABASE_URL: postgresql://postgres:postgres@localhost:5432/postgres
+          # Fail instead of silently skipping the Postgres suites.
+          REQUIRE_PG_TESTS: '1'
       - name: Tracked database must be untouched by tests
         run: git diff --exit-code -- data/

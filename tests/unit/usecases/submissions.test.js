@@ -174,23 +174,23 @@ describe('parseShopId', () => {
 describe('makeSubmitShopProposalUseCase', () => {
     const proposal = validateShopProposal(body(), enums);
 
-    it('passes the queue cap into the single capacity-checked INSERT', async () => {
-        const db = { get: jest.fn(), run: jest.fn().mockResolvedValue({ lastID: 7, changes: 1 }) };
-        const submit = makeSubmitShopProposalUseCase({ db, queueMax: 3, now: () => 1000 });
+    it('enqueues through the store with the queue cap and clock, never touching coffee_shops', async () => {
+        const db = { get: jest.fn(), run: jest.fn() };
+        const store = { enqueueSubmission: jest.fn().mockResolvedValue(7) };
+        const submit = makeSubmitShopProposalUseCase({ db, store, queueMax: 3, now: () => 1000 });
 
         await expect(submit({ kind: 'create', targetShopId: null, proposal })).resolves.toEqual({ submissionId: 7 });
 
-        const [sql, params] = db.run.mock.calls[0];
-        expect(sql).toMatch(/INSERT INTO shop_submissions/);
-        expect(sql).not.toMatch(/coffee_shops/);
-        expect(params[params.length - 1]).toBe(3);
-        expect(params[params.length - 2]).toBe(1000);
+        expect(store.enqueueSubmission).toHaveBeenCalledWith({
+            kind: 'create', targetShopId: null, proposal, now: 1000, queueMax: 3,
+        });
         expect(db.get).not.toHaveBeenCalled();
+        expect(db.run).not.toHaveBeenCalled();
     });
 
-    it('raises SUBMISSION_QUEUE_FULL when the capacity-checked INSERT stores nothing', async () => {
-        const db = { get: jest.fn(), run: jest.fn().mockResolvedValue({ lastID: 0, changes: 0 }) };
-        const submit = makeSubmitShopProposalUseCase({ db, queueMax: 0 });
+    it('raises SUBMISSION_QUEUE_FULL when the store reports the queue is full', async () => {
+        const store = { enqueueSubmission: jest.fn().mockResolvedValue(null) };
+        const submit = makeSubmitShopProposalUseCase({ db: { get: jest.fn() }, store, queueMax: 0 });
 
         await expect(submit({ kind: 'create', targetShopId: null, proposal }))
             .rejects.toMatchObject({ name: 'UnavailableError', code: 'SUBMISSION_QUEUE_FULL' });
@@ -198,10 +198,12 @@ describe('makeSubmitShopProposalUseCase', () => {
 
     it('update proposals check the target exists and never write coffee_shops', async () => {
         const db = { get: jest.fn().mockResolvedValue(undefined), run: jest.fn() };
-        const submit = makeSubmitShopProposalUseCase({ db, queueMax: 10 });
+        const store = { enqueueSubmission: jest.fn() };
+        const submit = makeSubmitShopProposalUseCase({ db, store, queueMax: 10 });
 
         await expect(submit({ kind: 'update', targetShopId: 5, proposal })).rejects.toBeInstanceOf(ValidationError);
         expect(db.get.mock.calls[0][0]).toMatch(/^SELECT id FROM coffee_shops WHERE id = \?$/);
         expect(db.run).not.toHaveBeenCalled();
+        expect(store.enqueueSubmission).not.toHaveBeenCalled();
     });
 });

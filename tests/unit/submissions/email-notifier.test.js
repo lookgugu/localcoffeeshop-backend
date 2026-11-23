@@ -106,7 +106,20 @@ describe('buildSubmissionEmail', () => {
         expect(html).not.toMatch(/https?:\/\/(corner|evil|phish)/);
         expect(text).not.toMatch(/https?:\/\/(corner|evil|phish)/);
         expect(text).toContain('https[:]//corner[.]example/menu');
-        expect(text).toContain('www[.]evil.example');
+        expect(text).toContain('www[.]evil[.]example');
+    });
+
+    it('defuses bare domains and email addresses in free text, but leaves ordinary prose alone', () => {
+        const { text, html } = buildSubmissionEmail(submission({
+            proposal: { ...PROPOSAL, description: 'Visit attacker.com or mail help@attacker.co.uk, e.g. at 10 Main St. today', address: '1 Main St. Ste 2' },
+        }));
+        for (const body of [text, html]) {
+            expect(body).not.toMatch(/attacker\.com|attacker\.co|help@/);
+            expect(body).toContain('attacker[.]com');
+            expect(body).toContain('help[@]attacker[.]co[.]uk');
+            expect(body).toContain('e.g. at 10 Main St. today');
+            expect(body).toContain('1 Main St. Ste 2');
+        }
     });
 
     it('keeps the subject on one line, free of bidi tricks, and bounded', () => {
@@ -169,6 +182,50 @@ describe('makeSubmissionNotifier', () => {
     it('a throwing fetch on every attempt still resolves to failed', async () => {
         const n = makeSubmissionNotifier({ config, logger: fakeLogger(), fetchImpl: fakeFetch(['throw']) });
         await expect(n.notify(submission())).resolves.toBe('failed');
+    });
+
+    it('concurrent sends report each skipped submission exactly once; a failed send hands its count on', async () => {
+        let now = 0;
+        const pending = [];
+        let failNext = false;
+        const fetchImpl = async (url, init) => {
+            const body = JSON.parse(init.body);
+            const status = failNext ? 422 : 200;
+            await new Promise((r) => pending.push(r));
+            return { status, ok: status === 200, body };
+        };
+        const calls = [];
+        const recording = async (url, init) => { calls.push(JSON.parse(init.body)); return fetchImpl(url, init); };
+        const n = makeSubmissionNotifier({
+            config: loadSubmissionNotifyConfig({ ...ENV, SUBMISSION_NOTIFY_MAX_PER_HOUR: '1' }),
+            logger: fakeLogger(),
+            fetchImpl: recording,
+            nowMs: () => now,
+        });
+        const settle = async () => { while (pending.length) pending.shift()(); await new Promise((r) => setImmediate(r)); };
+
+        const first = n.notify(submission({ submissionId: 1 }));
+        await n.notify(submission({ submissionId: 2 })); // capped
+        await n.notify(submission({ submissionId: 3 })); // capped
+        await settle();
+        expect(await first).toBe('sent');
+
+        // New hour, cap 1: one send carries the 2 skips; a concurrent one is capped.
+        now += 60 * 60 * 1000;
+        failNext = true;
+        const carrier = n.notify(submission({ submissionId: 4 }));
+        expect(await n.notify(submission({ submissionId: 5 }))).toBe('capped');
+        await settle();
+        expect(await carrier).toBe('failed');
+        expect(calls[1].text).toMatch(/2 earlier submission\(s\)/);
+
+        // The failed send's 2 skips plus #5 are all reported by the next email.
+        now += 60 * 60 * 1000;
+        failNext = false;
+        const next = n.notify(submission({ submissionId: 6 }));
+        await settle();
+        expect(await next).toBe('sent');
+        expect(calls[2].text).toMatch(/3 earlier submission\(s\)/);
     });
 
     it('caps emails per hour; the next email after the window reports how many were skipped', async () => {

@@ -54,9 +54,17 @@ function defang(value) {
     return String(value).replace(/\./g, '[.]').replace(/^(https?):\/\//i, '$1[:]//');
 }
 
-/** Free-text fields: break scheme and www prefixes so no URL becomes a link. */
+/**
+ * Free-text fields: break anything a mail client might auto-link. That covers
+ * schemes ("https://"), email addresses ("@") and bare domains ("evil.com"):
+ * a dot between a word character and two or more letters becomes "[.]".
+ * Ordinary prose ("e.g.", "10 Main St.") is untouched.
+ */
 function defangText(value) {
-    return String(value).replace(/\b(https?):\/\//gi, '$1[:]//').replace(/\bwww\./gi, 'www[.]');
+    return String(value)
+        .replace(/\b([a-z][a-z0-9+.-]*):\/\//gi, '$1[:]//')
+        .replace(/@/g, '[@]')
+        .replace(/([A-Za-z0-9-])\.(?=[A-Za-z]{2,})/g, '$1[.]');
 }
 
 function inline(value) {
@@ -179,13 +187,18 @@ function makeSubmissionNotifier({ config, logger, fetchImpl = globalThis.fetch, 
 
     async function notify(submission) {
         const log = { event: 'submission_notify', submissionId: submission.submissionId };
+        let carried = 0;
         try {
             if (!takeSlot()) {
                 skipped += 1;
                 logger.warn({ ...log, outcome: 'capped' }, 'Submission email skipped: hourly cap reached');
                 return 'capped';
             }
-            const carried = skipped;
+            // Reserve the skipped count synchronously, before any await, so
+            // concurrent sends never report (or subtract) the same skips twice.
+            // Restored below if this email fails.
+            carried = skipped;
+            skipped = 0;
             const email = buildSubmissionEmail({ ...submission, skipped: carried });
             const body = { from: config.from, to: [config.to], subject: email.subject, text: email.text, html: email.html };
             const key = `lcs-submission-${submission.submissionId}`;
@@ -201,13 +214,14 @@ function makeSubmissionNotifier({ config, logger, fetchImpl = globalThis.fetch, 
                 if (status !== 0 && status !== 429 && status < 500) break; // not retryable
             }
             if (status >= 200 && status < 300) {
-                skipped -= carried;
                 logger.info({ ...log, outcome: 'sent' }, 'Submission email sent to reviewer');
                 return 'sent';
             }
+            skipped += carried;
             logger.error({ ...log, outcome: 'failed', status }, 'Submission email failed; the submission is queued regardless');
             return 'failed';
         } catch (err) {
+            skipped += carried;
             logger.error({ ...log, outcome: 'failed', errName: err && err.name }, 'Submission email failed; the submission is queued regardless');
             return 'failed';
         }

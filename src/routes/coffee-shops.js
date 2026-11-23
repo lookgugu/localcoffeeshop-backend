@@ -77,7 +77,7 @@ function sendAccepted(res, { submissionId }, { kind, targetShopId, proposal }) {
 }
 
 function mountCoffeeShops(router, deps) {
-    const { db, queueStore, logger, enums, config } = deps;
+    const { db, queueStore, logger, enums, config, submissionNotifier } = deps;
     const idempotent = withIdempotency({ store: queueStore, logger });
     const submitShopProposal = makeSubmitShopProposalUseCase({
         db,
@@ -96,6 +96,11 @@ function mountCoffeeShops(router, deps) {
             },
             'Community submission queued for review',
         );
+        // Off the request path: the 202 never waits for, or fails on, the
+        // reviewer email. notify() never rejects; the catch is belt and braces.
+        if (submissionNotifier && submissionNotifier.enabled) {
+            submissionNotifier.notify({ submissionId: result.submissionId, ...req.submission }).catch(() => {});
+        }
         return sendAccepted(res, result, req.submission);
     });
 

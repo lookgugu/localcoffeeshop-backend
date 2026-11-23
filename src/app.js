@@ -21,6 +21,7 @@ const { mountApiV1 } = require('./routes/api-v1');
 const { mountSeo } = require('./routes/seo');
 const { makeWaitlistService } = require('./waitlist/service');
 const { makeResendProvider } = require('./waitlist/resend-provider');
+const { makeSubmissionNotifier } = require('./submissions/email-notifier');
 const { makeSqliteQueueStore } = require('./queue/sqlite-store');
 
 // body-parser `err.type` → client-facing message. Anything else stays a 500.
@@ -46,9 +47,11 @@ const BODY_PARSER_ERRORS = Object.freeze({
  * @param {Function} [deps.waitlistFetch] fetch used for the waitlist email
  *   provider (tests inject a fake; defaults to global fetch)
  * @param {Function} [deps.waitlistSleep] retry backoff sleep (tests)
+ * @param {Function} [deps.submissionNotifyFetch] fetch used for reviewer
+ *   submission emails (tests inject a fake; defaults to global fetch)
  * @returns {import('express').Application}
  */
-function buildApp({ config, db, cache, logger, metrics, enums, queueStore, waitlistFetch, waitlistSleep }) {
+function buildApp({ config, db, cache, logger, metrics, enums, queueStore, waitlistFetch, waitlistSleep, submissionNotifyFetch }) {
     const app = express();
     const queue = queueStore || Object.assign(makeSqliteQueueStore(db), { ready: true });
 
@@ -90,9 +93,17 @@ function buildApp({ config, db, cache, logger, metrics, enums, queueStore, waitl
         logger,
     });
 
+    // Reviewer email per queued submission; inert unless fully configured.
+    const submissionNotifier = makeSubmissionNotifier({
+        config: config.submissionNotify,
+        logger,
+        ...(submissionNotifyFetch ? { fetchImpl: submissionNotifyFetch } : {}),
+    });
+
     mountApiV1(app, {
         db,
         queueStore: queue,
+        submissionNotifier,
         cached,
         searchShopsUseCase,
         nearbyShopsUseCase,

@@ -45,27 +45,46 @@ The queue used to live in the SQLite file baked into the image. App Platform rep
 
 ### Production setup (operator)
 
-1. Create a DigitalOcean Managed PostgreSQL cluster (16) in the app's region, or reuse one, and add it to the app as a database component.
-2. In the cluster, create two login users, for example `lcs_api` (the API) and `lcs_review` (moderation).
-3. App environment variables (encrypted): `DATABASE_URL` = the `lcs_api` connection string, `MIGRATION_DATABASE_URL` = the `doadmin` connection string, `DATABASE_CA_CERT` = `${<db>.CA_CERT}`. Leave `SUBMISSIONS_ENABLED` unset.
-4. Deploy. The boot-time migration (as `doadmin`) creates the tables and the `lcs_app` / `lcs_reviewer` roles.
-5. As `doadmin`: `GRANT lcs_app TO lcs_api; GRANT lcs_reviewer TO lcs_review;` No restart is needed.
-   The reviewer's machine must be in the cluster's trusted sources. Reviewers connect with `REVIEW_DATABASE_URL` = the `lcs_review` connection string (never `lcs_api` or `doadmin`; the CLI refuses both) and `REVIEW_DATABASE_CA_CERT` = the cluster's CA certificate. See [submission-review-cli.md](submission-review-cli.md#postgres-the-production-queue).
-6. Check `GET https://api.localcoffeeshop.co/api/v1/health`: `submissions.storage` must be `postgres` and `submissions.queue` must be `ok`. `queue` reports `error` if Postgres is unreachable **or** the API's login lacks the `lcs_app` grants. `open` stays `false` until step 7.
-7. Only when the gate below is met, set `SUBMISSIONS_ENABLED=true`.
+Done on 2026-11-23 (backend #19): cluster `lcs-queue`, database `localcoffeeshop`. These steps record how, for a rebuild. The app never holds `doadmin`.
+
+1. Create a DigitalOcean Managed PostgreSQL 16 cluster in the app's region (a dedicated one: roles are cluster-wide) and add it to the app as a database component. Trusted sources: the app, plus each reviewer's machine.
+2. As `doadmin`, create the group roles first, so the migration never needs `CREATEROLE`: `CREATE ROLE lcs_app NOLOGIN; CREATE ROLE lcs_reviewer NOLOGIN;`. Then create the logins: `lcs_migrator` (owns the database, runs migrations), `lcs_api IN ROLE lcs_app` (the API) and `lcs_review IN ROLE lcs_reviewer` (moderation).
+3. Create the database owned by the migrator (`CREATE DATABASE localcoffeeshop OWNER lcs_migrator`). Then, as `lcs_migrator`: `REVOKE CONNECT, TEMPORARY ON DATABASE localcoffeeshop FROM PUBLIC; GRANT CONNECT ON DATABASE localcoffeeshop TO lcs_app, lcs_reviewer;`.
+4. App environment variables: `DATABASE_URL` = the `lcs_api` connection string (secret), `MIGRATION_DATABASE_URL` = the `lcs_migrator` connection string (secret), `DATABASE_CA_CERT` = `${<db>.CA_CERT}`. Leave `SUBMISSIONS_ENABLED` unset. `MIGRATION_DATABASE_URL` is required: the boot migration needs to create `schema_migrations` in the schema, which `lcs_api` cannot.
+5. Deploy, or migrate ahead with `MIGRATION_DATABASE_URL=… npm run migrate:pg -- up`.
+6. Reviewers connect with `REVIEW_DATABASE_URL` = the `lcs_review` connection string and `REVIEW_DATABASE_CA_CERT` = the cluster's CA certificate. The CLI refuses `lcs_api`, `lcs_migrator` and `doadmin`. See [submission-review-cli.md](submission-review-cli.md#postgres-the-production-queue).
+7. Check `GET https://api.localcoffeeshop.co/api/v1/health`: `submissions.storage` must be `postgres` and `submissions.queue` must be `ok`. `queue` reports `error` if Postgres is unreachable **or** the API's login lacks the `lcs_app` grants. `open` stays `false` until step 8.
+8. Only when the gate below is met, set `SUBMISSIONS_ENABLED=true`.
 
 ### Release gate before `SUBMISSIONS_ENABLED=true`
 
 | Gate | Status |
 |---|---|
-| Durable storage: proposals, idempotency and review audit together, atomic capacity | **Done in code** (this change); needs the database provisioned (setup above) |
+| Durable storage: proposals, idempotency and review audit together, atomic capacity | **Done**: code (#17) and production database (#19, 2026-11-23) |
 | Idempotency edge cases B-01 (expired-key 409) and B-02b (fail-open on storage error) | **Fixed** (this change) |
-| Least-privilege identities: the public app cannot decide or publish | **Done in schema**; needs the login users and grants (setup step 2) |
-| Review tooling on the durable store | **Done in code**: `scripts/review-submissions.js --postgres` (backend #20); needs the `lcs_review` login from the setup above |
-| Confirmed reviewer/owner, cadence, retention and privacy policy | **Open**: a product-owner decision; record it here |
+| Least-privilege identities: the public app cannot decide or publish | **Done**: schema grants plus the `lcs_api` / `lcs_review` / `lcs_migrator` logins (#19) |
+| Review tooling on the durable store | **Done**: `npm run review -- --postgres …` (#20) with the `lcs_review` login |
+| Confirmed reviewer/owner, cadence, retention and privacy policy | **Partly done**: reviewer and notification decided (see [Review process](#review-process)); backup reviewer, retention and the privacy-page line are still open |
 | Real App Platform `X-Forwarded-For` hop behaviour verified against `trust proxy = 1` | **Open**: needs a check against production |
 | Restore drill (backup and restore of the queue database) | **Open** |
 | Publication path | Still a separate, human-reviewed change (for example a data PR); not built |
+
+### Review process
+
+Decided by the project owner on 2026-11-23 (backend #21):
+
+- **Reviewer:** the project owner (GitHub `lookgugu`), who holds the `lcs_review` login. There is no backup reviewer yet.
+- **Notification:** each queued submission is emailed to the reviewer (`SUBMISSION_NOTIFY_*`, `src/submissions/`), so review happens as submissions arrive and nobody has to poll the queue. The email is best effort: a failed or capped email never affects the submission, and the queue (`npm run review -- --postgres list`) stays the source of truth. At most `SUBMISSION_NOTIFY_MAX_PER_HOUR` emails go out per hour (default 20). Past the cap, the next email says how many submissions arrived without one. Submitted content is shown as untrusted, HTML-escaped plain text with every link defused. The recipient address is set only in the app's environment, never in the repository.
+- **Privacy:** the email puts a copy of the submission (which may include a phone number and free text) in the reviewer's mailbox. Delete those emails along with the queue rows once retention is decided. Reviewers must not put personal data in the append-only `reason` field.
+- **Still open:** a backup reviewer; what to do as the queue nears `SUBMISSION_QUEUE_MAX` (500); retention for pending, rejected and approved rows, the audit and the emails; and whether the privacy page (frontend #18/#22) needs a line about submissions.
+
+| Variable | Purpose |
+|---|---|
+| `SUBMISSION_NOTIFY_ENABLED` | `true` to send reviewer emails. Anything else disables them. |
+| `SUBMISSION_NOTIFY_TO` | Reviewer address (one) |
+| `SUBMISSION_NOTIFY_FROM` | Sender on a Resend-verified domain, e.g. `LocalCoffeeShop <submissions@mail.localcoffeeshop.co>` |
+| `SUBMISSION_NOTIFY_RESEND_API_KEY` | A dedicated **sending-only** Resend key, restricted to that domain. Never the waitlist key: there is no fallback. |
+| `SUBMISSION_NOTIFY_MAX_PER_HOUR` | 1–1000, default 20 |
 
 ## Deploy, migration and rollback
 

@@ -1,12 +1,12 @@
-# Private submission review CLI (local SQLite operator tooling)
+# Private submission review CLI (operator tooling)
 
-> **2026-11-22:** production's queue now lives in Postgres (see [community-submissions.md](community-submissions.md#durable-queue-postgres)). This tool still reads and writes SQLite copies only; porting it to the Postgres queue (as the `lcs_reviewer` role) is the next change and a release gate.
+> **2026-11-22 (backend #20):** the tool now also works on the production queue in Postgres (`--postgres`, as an `lcs_reviewer` login). See [Postgres: the production queue](#postgres-the-production-queue). Everything below about SQLite still applies to `--db`.
 
-Status as of 2026-10-17, branch `feat/submission-review-local-20261017`, base `a41e136`.
+Originally written 2026-10-17 (branch `feat/submission-review-local-20261017`, base `a41e136`) for SQLite copies only.
 
-`scripts/review-submissions.js` lets an operator **list, inspect and record a moderation decision** on rows in the `shop_submissions` queue (see [community-submissions.md](community-submissions.md)). It is a local command-line tool. Nothing in `src/` imports it, it has no HTTP surface, and a test enforces this (`scope guard` in `tests/integration/review-submissions.test.js`).
+`scripts/review-submissions.js` lets an operator **list, inspect and record a moderation decision** on rows in the `shop_submissions` queue (see [community-submissions.md](community-submissions.md)). It is a command-line tool run from an operator's machine. Nothing in `src/` imports it, it has no HTTP surface, and a test enforces this (`scope guard` in `tests/integration/review-submissions.test.js`).
 
-This slice does **not** make the queue durable, does **not** publish anything, and does **not** change production. Submissions stay closed in production (`SUBMISSIONS_ENABLED` unset). The release gates below are all still open.
+It does **not** publish anything. Submissions stay closed in production (`SUBMISSIONS_ENABLED` unset) until the release gate in [community-submissions.md](community-submissions.md#release-gate-before-submissions_enabledtrue) is met.
 
 ## What a decision means
 
@@ -30,9 +30,9 @@ node scripts/review-submissions.js --db "$DB" approve <id> --expect-sha256 <hex>
 node scripts/review-submissions.js --db "$DB" approve <id> --expect-sha256 <hex> --reviewer <id> --reason "<text>" --apply  # writes
 ```
 
-`reject` takes the same options. Output is JSON on stdout. Errors go to stderr. Exit codes: `0` ok, `1` refused/failed, `2` usage error.
+`reject` takes the same options. Every command needs exactly one of `--db <path>` or `--postgres`. Output is JSON on stdout. Errors go to stderr. Exit codes: `0` ok, `1` refused/failed, `2` usage error.
 
-## Safety properties (each covered by a subprocess test against a real SQLite file)
+## Safety properties with `--db` (each covered by a subprocess test against a real SQLite file)
 
 - **Database selection.** `--db` is mandatory. `:memory:`, `file:` URIs and empty values are rejected. The path must already exist as a regular file and is opened without `OPEN_CREATE`, so a typo never creates a database. The tracked `data/coffee_shops.db` is refused by canonical path and by inode, so absolute, relative, `..`, file-symlink and directory-symlink spellings are all refused. All arguments are validated **before** the database is touched.
 - **No automatic migrations.** If `shop_submissions` or `submission_reviews` is missing, the tool refuses and tells the operator to run `npm run migrate -- up` explicitly against that file.
@@ -43,9 +43,32 @@ node scripts/review-submissions.js --db "$DB" approve <id> --expect-sha256 <hex>
 - **Pending-only, final, atomic.** Apply runs in `BEGIN IMMEDIATE`. It re-reads the row, checks the digest and `status = 'pending'`, inserts the audit row, then runs `UPDATE … WHERE id = ? AND status = 'pending'` (exactly one row), then commits. Any failure rolls back both writes; this is tested by injecting a trigger failure after the audit insert. Replays and contradicting decisions fail with "not pending". Concurrent processes wait on an explicit 5 s busy timeout, and exactly one decision lands (tested with 8 racing processes).
 - **Audit table** (`migrations/20261017_03_create_submission_reviews.sql`, additive and forward-only): `submission_id` (UNIQUE), `old_status` (= `pending`), `new_status`, `reviewer`, `reason`, `payload_sha256`, `decided_at` (epoch seconds). CHECK constraints bound every field. Triggers reject `UPDATE`/`DELETE`, so rows are append-only. `migrate down` refuses the file (no down section), and the ledger and audit rows are retained.
 
+## Postgres: the production queue
+
+```bash
+export REVIEW_DATABASE_URL='postgresql://lcs_review:…@<cluster-host>:25060/defaultdb?sslmode=require'
+export REVIEW_DATABASE_CA_CERT="$(cat ca-certificate.crt)"   # the cluster's CA; falls back to DATABASE_CA_CERT
+node scripts/review-submissions.js --postgres list
+node scripts/review-submissions.js --postgres show <id>
+node scripts/review-submissions.js --postgres approve <id> --expect-sha256 <hex> --reviewer <id> --reason "<text>" [--apply]
+```
+
+Same commands, gates, output and exit codes as SQLite. What differs:
+
+- **Which login.** The URL is read only from `REVIEW_DATABASE_URL`, never from argv (so the password stays out of shell history and `ps`) and never from `DATABASE_URL` (the API's `lcs_app` login). A `REVIEW_DATABASE_URL` equal to `DATABASE_URL` is refused. TLS follows `src/queue/postgres-pool.js`: certificate verification is never turned off.
+- **Least privilege, checked.** Before any command, the tool checks the login's effective privileges. It must be able to read submissions, update `status` and read/append the audit. It must **not** be able to insert or delete submissions, update any content column, update or delete the audit, or read `idempotency_keys`. So the table owner (`doadmin`, which ran the migrations), a superuser and an `lcs_app` login are all refused, even though some of them could do the job. Use a dedicated login granted `lcs_reviewer`.
+- **Read-only by default.** Without `--apply` the session is set to `READ ONLY`, so Postgres itself refuses any write.
+- **Atomic decision.** One transaction: `SELECT … FOR UPDATE` on the row, digest and `pending` checks, `INSERT` into `submission_reviews`, `UPDATE … SET status WHERE id = $1 AND status = 'pending'` (exactly one row), `COMMIT`. Any failure rolls back both writes. A concurrent decision waits on the row lock (`lock_timeout` 5 s), then re-reads the committed row and is refused as not pending; the audit's `UNIQUE (submission_id)` backs this up. Statements are bounded by a 15 s `statement_timeout`.
+- **Schema refusals are reported, not crashes.** The migration's triggers (content immutable, status only `pending → approved|rejected`, audit append-only) and grants are the last line of defence. Their errors come back as `database refused the decision: …; nothing recorded` or `permission denied …`, exit 1.
+- **Same digest.** `BIGINT` columns come back from node-postgres as strings; they are converted to numbers before printing or hashing, so a submission's `payloadSha256` is identical on both backends.
+- **No migrations.** If the tables are missing it refuses and points to `npm run migrate:pg -- up`.
+- **Network.** The reviewer's machine must be in the cluster's trusted sources.
+
+Covered by `tests/integration/review-submissions-postgres.test.js`, which runs the CLI as a subprocess with real login roles against a throwaway Postgres database (CI's `postgres:16` service).
+
 ## Identity and authority
 
-`--reviewer` is **audit attribution, not authentication.** Anyone who can run the script can type any reviewer id. The actual authority is whoever has OS-level and file-level write access to the database file. Restrict that with normal filesystem permissions and, once storage moves, with database roles. **The owner of the review process is still unconfirmed.** Recording a reviewer id does not establish who that owner is.
+`--reviewer` is **audit attribution, not authentication.** Anyone who can run the script can type any reviewer id. The actual authority is whoever has OS-level and file-level write access to the database file. Restrict that with normal filesystem permissions for SQLite copies. On Postgres the authority is the `lcs_reviewer` login: whoever holds its password can decide, so it should be one login per reviewer (rotate or drop it when someone stops reviewing). **The owner of the review process is still unconfirmed.** Recording a reviewer id does not establish who that owner is.
 
 ## Known limitations
 
@@ -53,9 +76,9 @@ node scripts/review-submissions.js --db "$DB" approve <id> --expect-sha256 <hex>
 - Free-text `reason` is stored indefinitely in an append-only table. Reviewers should not put personal data in it. Retention and redaction policy is undecided.
 - A decision is final in this tool. Reopening a submission needs a separate, audited design.
 
-## Deferred: storage and release gates (unchanged by this slice)
+## Release gates (history)
 
-Production serves an ephemeral SQLite file baked into the image, so queued proposals **and** this audit would be lost on every deploy. This tool is for local or operator-held copies only. Storage design is deliberately deferred. A managed PostgreSQL option exists in the account, but whether it can be shared, how much capacity it has, and who owns it are all unknown. No adapter was written and no deployment was chosen. Before `SUBMISSIONS_ENABLED=true`:
+When this tool was first written, production served an ephemeral SQLite file and none of these gates were met. Durable storage (1) and review tooling on it are now done in code (backend #17, #20); the current status of every gate lives in [community-submissions.md](community-submissions.md#release-gate-before-submissions_enabledtrue). The original list, before `SUBMISSIONS_ENABLED=true`:
 
 1. **Durable storage** chosen by the owner. Proposals, idempotency reservations/outcomes and this review audit must move together, with transactional enqueue, idempotency and capacity enforcement. Re-run the fresh/existing migration, rollback, concurrency and retention tests on that storage, plus a restore drill.
 2. **Idempotency** edge cases closed on the new storage: the expired-key 409 (B-01) and fail-open on storage error (B-02b).

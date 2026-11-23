@@ -11,6 +11,7 @@
 const fs = require('fs');
 const { boundedInt } = require('./lib/bounded-int');
 const { loadWaitlistConfig } = require('./waitlist/config');
+const { loadSubmissionNotifyConfig } = require('./submissions/notify-config');
 
 /**
  * Build the immutable configuration object from environment variables.
@@ -81,6 +82,13 @@ function loadConfig(env = process.env) {
         config.warnings.push(`Waitlist disabled (503) - fix: ${config.waitlist.problems.join('; ')}`);
     } else if (config.waitlist.reason === 'disabled' && nodeEnv === 'production') {
         config.recommendations.push('WAITLIST_ENABLED is not "true" - roaster-subscription waitlist returns 503');
+    }
+
+    // Reviewer email for each queued submission (src/submissions/). Optional:
+    // a missing or invalid setting disables the email, never submissions.
+    config.submissionNotify = loadSubmissionNotifyConfig(env);
+    if (config.submissionNotify.reason === 'misconfigured') {
+        config.warnings.push(`Submission emails disabled - fix: ${config.submissionNotify.problems.join('; ')}`);
     }
 
     if (config.nodeEnv === 'production') {

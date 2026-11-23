@@ -53,6 +53,8 @@ node scripts/review-submissions.js --postgres show <id>
 node scripts/review-submissions.js --postgres approve <id> --expect-sha256 <hex> --reviewer <id> --reason "<text>" [--apply]
 ```
 
+`npm run review -- <args>` is the same as `node scripts/review-submissions.js <args>`. Each queued submission is also emailed to the reviewer with these commands filled in (see [community-submissions.md](community-submissions.md#review-process)).
+
 Same commands, gates, output and exit codes as SQLite. What differs:
 
 - **Which login.** The URL is read only from `REVIEW_DATABASE_URL`, never from argv (so the password stays out of shell history and `ps`) and never from `DATABASE_URL` (the API's `lcs_app` login). A `REVIEW_DATABASE_URL` equal to `DATABASE_URL` is refused. TLS follows `src/queue/postgres-pool.js`: certificate verification is never turned off.

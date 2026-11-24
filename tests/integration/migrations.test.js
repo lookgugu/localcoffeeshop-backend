@@ -20,6 +20,8 @@ const DEDUP_MIGRATION = '20261030_01_remove_duplicate_listings.sql';
 const CLEANUP_MIGRATION = '20261030_02_remove_non_coffee_listings.sql';
 const STARBUCKS_MIGRATION = '20261118_01_remove_starbucks_listings.sql';
 const DUNKIN_MIGRATION = '20261118_02_remove_dunkin_listings.sql';
+const BOSTON_ROASTERS_MIGRATION = '20261123_01_add_greater_boston_roasters.sql';
+const BOSTON_ROASTERS_SOURCE = 'greater_boston_roasters_2026-11.sheet';
 const NEW_MIGRATIONS = [
     '20261017_01_create_shop_submissions.sql',
     '20261017_02_idempotency_request_hash.sql',
@@ -28,7 +30,17 @@ const NEW_MIGRATIONS = [
     CLEANUP_MIGRATION,
     STARBUCKS_MIGRATION,
     DUNKIN_MIGRATION,
+    BOSTON_ROASTERS_MIGRATION,
 ];
+
+/** Rows added by the Greater Boston roasters migration, and every other row. */
+async function splitAdded(dbPath) {
+    const rows = await publishedRows(dbPath);
+    return {
+        added: rows.filter((r) => r.source_file === BOSTON_ROASTERS_SOURCE),
+        rest: rows.filter((r) => r.source_file !== BOSTON_ROASTERS_SOURCE),
+    };
+}
 // Test setup only: rewind a throw-away copy to the state before 20261017_03.
 const REWIND_03 = `
     DROP TRIGGER submission_reviews_append_only_update;
@@ -149,7 +161,7 @@ describe('Migrations (scripts/migrate.js)', () => {
         ]);
     });
 
-    it('existing database (copy of data/coffee_shops.db): removes only duplicate copies, non-coffee listings, Starbucks and Dunkin listings, reapply is a no-op', async () => {
+    it('existing database (copy of data/coffee_shops.db): removes only duplicate copies, non-coffee listings, Starbucks and Dunkin listings, adds the Greater Boston roasters, reapply is a no-op', async () => {
         const dbPath = path.join(tmp, 'existing.db');
         fs.copyFileSync(TRACKED_DB, dbPath);
         const rowsBefore = await publishedRows(dbPath);
@@ -180,7 +192,17 @@ describe('Migrations (scripts/migrate.js)', () => {
 
         migrate(dbPath, 'up');
 
-        expect(await publishedDigest(dbPath)).toEqual(before);
+        // The roasters migration adds 23 MA listings, each with coordinates and in the search index;
+        // every other row is exactly what the removals leave.
+        const { added, rest } = await splitAdded(dbPath);
+        expect(digest(rest)).toEqual(before);
+        expect(added).toHaveLength(23);
+        expect(added.every((r) => r.state === 'MA' && /, MA \d{5}, USA$/.test(r.address))).toBe(true);
+        const unplaced = await withDb(dbPath, (db) => all(db, 'SELECT id FROM coffee_shops WHERE source_file = ? AND (latitude IS NULL OR longitude IS NULL)', [BOSTON_ROASTERS_SOURCE]));
+        expect(unplaced).toEqual([]);
+        const found = await withDb(dbPath, (db) => all(db, "SELECT c.name FROM coffee_shops c JOIN coffee_shops_fts f ON c.id = f.rowid WHERE coffee_shops_fts MATCH 'slacktide'"));
+        expect(found).toEqual([{ name: 'SlackTide Coffee Roasters' }]);
+        const afterFirst = digest([...rest, ...added]);
         expect(await appliedMigrations(dbPath)).toEqual(expect.arrayContaining([...appliedBefore, ...NEW_MIGRATIONS]));
         const remainingChains = await withDb(dbPath, (db) => all(db, "SELECT id FROM coffee_shops WHERE lower(name) LIKE '%starbucks%' OR lower(name) LIKE '%dunkin%'"));
         expect(remainingChains).toEqual([]);
@@ -189,7 +211,7 @@ describe('Migrations (scripts/migrate.js)', () => {
         const second = migrate(dbPath, 'up');
         expect(second).toMatch(/No pending migrations/);
         expect(await schemaOf(dbPath)).toEqual(schemaAfterFirst);
-        expect(await publishedDigest(dbPath)).toEqual(before);
+        expect(await publishedDigest(dbPath)).toEqual(afterFirst);
     });
 
     it('CHECK constraints in the shipped DDL reject out-of-bounds rows even if app validation regressed', async () => {
@@ -298,7 +320,7 @@ describe('Migrations (scripts/migrate.js)', () => {
             migrate(dbPath, 'up');
             const after = await snapshot(dbPath);
             expect(after.ledger.map((r) => r.name)).toEqual([
-                ...before.ledger.map((r) => r.name), DEDUP_MIGRATION, CLEANUP_MIGRATION, STARBUCKS_MIGRATION, DUNKIN_MIGRATION,
+                ...before.ledger.map((r) => r.name), DEDUP_MIGRATION, CLEANUP_MIGRATION, STARBUCKS_MIGRATION, DUNKIN_MIGRATION, BOSTON_ROASTERS_MIGRATION,
             ].sort());
             expect({ ...after, ledger: before.ledger }).toEqual(before);
             expect(migrate(dbPath, 'up')).toMatch(/No pending migrations/);
@@ -321,7 +343,7 @@ describe('Migrations (scripts/migrate.js)', () => {
             migrate(dbPath, 'up');
             const after = await snapshot(dbPath);
             expect(after.ledger.map((r) => r.name)).toEqual([
-                ...before.ledger.map((r) => r.name), REVIEWS_MIGRATION, DEDUP_MIGRATION, CLEANUP_MIGRATION, STARBUCKS_MIGRATION, DUNKIN_MIGRATION,
+                ...before.ledger.map((r) => r.name), REVIEWS_MIGRATION, DEDUP_MIGRATION, CLEANUP_MIGRATION, STARBUCKS_MIGRATION, DUNKIN_MIGRATION, BOSTON_ROASTERS_MIGRATION,
             ].sort());
             expect(after.submissions).toEqual(before.submissions);
             expect(after.keys).toEqual(before.keys);
@@ -346,7 +368,7 @@ describe('Migrations (scripts/migrate.js)', () => {
             migrate(dbPath, 'up');
             const after = await snapshot(dbPath);
             expect(after.ledger.map((r) => r.name)).toEqual([
-                ...before.ledger.map((r) => r.name), '20261017_02_idempotency_request_hash.sql', REVIEWS_MIGRATION, DEDUP_MIGRATION, CLEANUP_MIGRATION, STARBUCKS_MIGRATION, DUNKIN_MIGRATION,
+                ...before.ledger.map((r) => r.name), '20261017_02_idempotency_request_hash.sql', REVIEWS_MIGRATION, DEDUP_MIGRATION, CLEANUP_MIGRATION, STARBUCKS_MIGRATION, DUNKIN_MIGRATION, BOSTON_ROASTERS_MIGRATION,
             ].sort());
             expect(after.submissions).toEqual(before.submissions);
             expect(await columns(dbPath, 'idempotency_keys')).toContain('request_hash');

@@ -58,8 +58,16 @@ describe('loadConfig — submission limits', () => {
         ['WRITE_RATE_LIMIT_WINDOW_MS', '2147483648'],
         ['WRITE_RATE_LIMIT_WINDOW_MS', '99999999999999999999'],
         ['WRITE_RATE_LIMIT_WINDOW_MS', '15m'],
+        ['TRUST_PROXY_HOPS', '0'],
+        ['TRUST_PROXY_HOPS', '6'],
+        ['TRUST_PROXY_HOPS', 'true'],
     ])('%s=%p is rejected with a message naming the variable', (name, value) => {
         expect(() => loadConfig({ [name]: value })).toThrow(new RegExp(name));
+    });
+
+    it('TRUST_PROXY_HOPS defaults to 2 (Cloudflare + DO ingress) and can be overridden', () => {
+        expect(loadConfig({}).trustProxyHops).toBe(2);
+        expect(loadConfig({ TRUST_PROXY_HOPS: '1' }).trustProxyHops).toBe(1);
     });
 
     it('accepts the inclusive bounds', () => {

@@ -56,8 +56,10 @@ function buildApp({ config, db, cache, logger, metrics, enums, queueStore, waitl
     const queue = queueStore || Object.assign(makeSqliteQueueStore(db), { ready: true });
 
     if (config.nodeEnv === 'production') {
-        // Trust the first proxy hop so req.secure works with X-Forwarded-Proto.
-        app.set('trust proxy', 1);
+        // Trust the platform's proxy hops (Cloudflare + DO ingress, see
+        // config.trustProxyHops) so req.ip is the real client, which the
+        // rate limits key on, and req.secure follows X-Forwarded-Proto.
+        app.set('trust proxy', config.trustProxyHops);
     }
 
     mountMiddleware(app, { config, logger, metrics });

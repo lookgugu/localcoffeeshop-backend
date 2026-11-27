@@ -66,7 +66,7 @@ Done on 2026-11-23 (backend #19): cluster `lcs-queue`, database `localcoffeeshop
 | Review tooling on the durable store | **Done**: `npm run review -- --postgres …` (#20) with the `lcs_review` login |
 | Confirmed reviewer/owner, cadence, retention and privacy policy | **Partly done**: reviewer and notification decided (see [Review process](#review-process)); backup reviewer, retention and the privacy-page line are still open |
 | Real App Platform `X-Forwarded-For` hop behaviour verified | **Done 2026-11-27**: two hops, not one; `trust proxy` now 2 (see "Proxy hops") |
-| Restore drill (backup and restore of the queue database) | **Open** |
+| Restore drill (backup and restore of the queue database) | **Done 2026-11-27**: point-in-time fork restored rows, audit and logins (see "Restore drill") |
 | Publication path | Still a separate, human-reviewed change (for example a data PR); not built |
 
 ### Review process
@@ -134,6 +134,27 @@ Lock-only, semver-compatible, limited to the request path: express 4.22.3, body-
 
 - With `DATABASE_URL` set the queue is durable (see above). Decisions are recorded with the operator CLI (`--postgres`); there is still no review UI or publication path.
 - Rate limiting is per IP. A distributed attacker can still fill the queue up to the cap, after which they hit 503.
+
+### Restore drill (2026-11-27, #23)
+
+DigitalOcean keeps daily backups of `lcs-queue` (23:00 UTC) plus point-in-time recovery, so a restore can target any moment, not only the last nightly backup. What was done, and how to do it again:
+
+1. **Seed.** Two labelled test submissions (`RESTORE DRILL 1`, `RESTORE DRILL 2`, ids 1 and 2) were queued in production as `lcs_api` through the queue store, and #1 was rejected with `npm run review -- --postgres reject` as `lcs_review`. Production keeps these rows: the queue is append-only by design. #1 is rejected and #2 stays pending; reject #2 with reason `Restore drill #23 test data` before opening submissions, or leave it as a known test row.
+2. **Restore into a new cluster, never over production:**
+   `doctl databases fork lcs-queue-restore-drill --restore-from-cluster-id <lcs-queue id> --restore-from-timestamp "<YYYY-MM-DD HH:MM:SS +0000 UTC>"`
+   Leave out the timestamp to use the latest nightly backup. The fork took **8 minutes** to come online. It keeps the source's firewall rules (the app and the operator IP), its CA certificate, its database `localcoffeeshop`, and every role and password, so the existing `lcs_api`, `lcs_migrator` and `lcs_review` logins work unchanged against the new host.
+3. **Check** with the three logins pointed at the fork's host:
+   - `npm run migrate:pg -- status` → `001_submission_queue.sql applied` (the checksum is verified).
+   - `npm run review -- --postgres list --status all` → both rows with the right status. `show 1` → the reject audit (reviewer, reason, `payloadSha256` matching the row).
+   - A local API with `DATABASE_URL` (lcs_api) **and** `MIGRATION_DATABASE_URL` (lcs_migrator), and `DB_PATH` set to a **copy** of the SQLite file (startup runs SQLite migrations): `/api/v1/health` → `queue: "ok"`.
+4. **Delete** the fork: `doctl databases delete <fork id>`.
+
+From the restore request to a verified, healthy copy took about **9 minutes**.
+
+**Gaps found:**
+- Without `MIGRATION_DATABASE_URL` the API's startup migration runs as `lcs_api`, fails with `permission denied for schema public`, and health reports `queue: "error"`. That is the intended privilege split, not a restore fault, but any server pointed at a restored copy (including a production cut-over) needs **both** URLs.
+- To fail production over to a restore, update `DATABASE_URL` and `MIGRATION_DATABASE_URL` in the app spec to the fork's host. The fork does not replace `lcs-queue` automatically, and the firewall must still trust the app.
+- `submission_reviews.decided_at` is in epoch **seconds** while `shop_submissions.created_at` is in **milliseconds**. That doesn't matter for a restore, but anyone reading the raw rows should know.
 
 ### Proxy hops (verified 2026-11-27, #22)
 

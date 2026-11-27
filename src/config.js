@@ -67,6 +67,13 @@ function loadConfig(env = process.env) {
         // setTimeout limit.
         writeRateLimitWindowMs: boundedInt(env, 'WRITE_RATE_LIMIT_WINDOW_MS', { min: 1000, max: 86400000, fallback: 3600000 }),
         writeRateLimitMax: boundedInt(env, 'WRITE_RATE_LIMIT_MAX', { min: 1, max: 10000, fallback: 10 }),
+        // Proxy hops in front of the app in production, for `trust proxy`.
+        // App Platform routes every request through Cloudflare and then DO's
+        // ingress, so X-Forwarded-For arrives as "<client>,<cloudflare edge>"
+        // (measured 2026-11-27 on both the custom and the default domain).
+        // Two hops makes req.ip the client; one would make it the Cloudflare
+        // edge, which many visitors share.
+        trustProxyHops: boundedInt(env, 'TRUST_PROXY_HOPS', { min: 1, max: 5, fallback: 2 }),
         warnings: [],
         recommendations: [],
     };

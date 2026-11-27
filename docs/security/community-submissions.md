@@ -13,7 +13,7 @@ Before this change, `POST /api/v1/coffee-shops` inserted straight into the publi
 | Public writes | `POST` and `PUT` never touch `coffee_shops`. A valid proposal goes into `shop_submissions` with `status='pending'` and gets **202** `{ success: true, data: { submissionId, status: 'pending_review', kind, targetShopId, message, displayName, formattedAddress, state, priceLevel } }` with `Cache-Control: no-store`. Unlike before, `data.id` is not returned, so nothing claims a published id. |
 | PUT | A strict id check (`^[1-9][0-9]{0,9}$`): `12abc`, `1e3` and `01` are rejected with 400. The target must exist (400 otherwise, the same as before). The request is queued as `kind='update'` and the live row is left alone. |
 | Validation | Name ≤200, address ≤300, phone ≤32 (digits, spaces and `+().-`), website ≤300 (absolute http/https, no credentials), description ≤1000 (newlines allowed, other control characters rejected), price level must be in the enum, state must be a US code, languageCode must be a BCP-47 tag ≤16. Unknown fields, including the client-generated `id`, are ignored. The table's CHECK constraints repeat these bounds. |
-| Write rate limit | One per-IP budget covers every `POST`/`PUT`/`PATCH`/`DELETE` under `/api/`: the v1 router, the legacy `/api/*` 301 alias, and case or trailing-slash variants. Default is 10 per hour (`WRITE_RATE_LIMIT_MAX`, `WRITE_RATE_LIMIT_WINDOW_MS`). Over the limit you get **429** with `Retry-After` and `error.code = 'RATE_LIMITED'`. The limiter runs **before the JSON body parser**, validation and idempotency, so malformed or oversized bodies, invalid requests and rotated `Idempotency-Key` values all spend the budget. The key is `req.ip`, which follows `X-Forwarded-For` only through `trust proxy = 1` in production. `X-Real-IP`, `DO-Connecting-IP`, `CF-Connecting-IP`, `True-Client-IP`, `Forwarded`, and the forged left-most XFF entries are all ignored. |
+| Write rate limit | One per-IP budget covers every `POST`/`PUT`/`PATCH`/`DELETE` under `/api/`: the v1 router, the legacy `/api/*` 301 alias, and case or trailing-slash variants. Default is 10 per hour (`WRITE_RATE_LIMIT_MAX`, `WRITE_RATE_LIMIT_WINDOW_MS`). Over the limit you get **429** with `Retry-After` and `error.code = 'RATE_LIMITED'`. The limiter runs **before the JSON body parser**, validation and idempotency, so malformed or oversized bodies, invalid requests and rotated `Idempotency-Key` values all spend the budget. The key is `req.ip`, which follows `X-Forwarded-For` only through the `trust proxy` hops in production (`TRUST_PROXY_HOPS`, default 2: Cloudflare, then DO ingress; see "Proxy hops" below). `X-Real-IP`, `DO-Connecting-IP`, `CF-Connecting-IP`, `True-Client-IP`, `Forwarded`, and the forged left-most XFF entries are all ignored. |
 | Queue bound | An atomic `INSERT … SELECT … WHERE (pending count) < SUBMISSION_QUEUE_MAX` (default 500). On Postgres it runs under a transaction-scoped advisory lock, because Postgres has no database-wide write lock to make the count-then-insert atomic. When the queue is full: **503** `SUBMISSION_QUEUE_FULL` plus `Retry-After`. Reviewed rows don't count toward the cap. |
 | Idempotency | Order per route: kill switch → validate → idempotency → handler. Invalid requests never reserve a key. Keys must match `[A-Za-z0-9._:-]{1,128}`, otherwise 400 `IDEMPOTENCY_KEY_INVALID`. Each reservation stores a SHA-256 of method, route, params and body. Reusing a key for a different request gives **422** `IDEMPOTENCY_KEY_REUSED`: the stored response is not replayed and the handler does not run. **Legacy rows with a NULL fingerprint fail closed (422)**, so a pre-moderation "shop created" response is never replayed. Non-2xx outcomes (400, 503, 500) release the key. A key older than the 24h TTL is replaced atomically on reuse (fixes B-01). If idempotency storage fails, the write is refused with **503** `IDEMPOTENCY_UNAVAILABLE` and the handler does not run (fixes B-02b). |
 | Errors | Malformed JSON returns 400 and an oversized body returns 413, both in the standard envelope (they used to be 500). |
@@ -65,8 +65,8 @@ Done on 2026-11-23 (backend #19): cluster `lcs-queue`, database `localcoffeeshop
 | Least-privilege identities: the public app cannot decide or publish | **Done**: schema grants plus the `lcs_api` / `lcs_review` / `lcs_migrator` logins (#19) |
 | Review tooling on the durable store | **Done**: `npm run review -- --postgres …` (#20) with the `lcs_review` login |
 | Confirmed reviewer/owner, cadence, retention and privacy policy | **Partly done**: reviewer and notification decided (see [Review process](#review-process)); backup reviewer, retention and the privacy-page line are still open |
-| Real App Platform `X-Forwarded-For` hop behaviour verified against `trust proxy = 1` | **Open**: needs a check against production |
-| Restore drill (backup and restore of the queue database) | **Open** |
+| Real App Platform `X-Forwarded-For` hop behaviour verified | **Done 2026-11-27**: two hops, not one; `trust proxy` now 2 (see "Proxy hops") |
+| Restore drill (backup and restore of the queue database) | **Done 2026-11-27**: point-in-time fork restored rows, audit and logins (see "Restore drill") |
 | Publication path | Still a separate, human-reviewed change (for example a data PR); not built |
 
 ### Review process
@@ -133,7 +133,41 @@ Lock-only, semver-compatible, limited to the request path: express 4.22.3, body-
 ## Known limitations and follow-ups
 
 - With `DATABASE_URL` set the queue is durable (see above). Decisions are recorded with the operator CLI (`--postgres`); there is still no review UI or publication path.
-- Rate limiting is per IP. A distributed attacker can still fill the queue up to the cap, after which they hit 503. `trust proxy = 1` assumes exactly one proxy hop at DO; check this against real DO headers before relying on per-client fairness.
+- Rate limiting is per IP. A distributed attacker can still fill the queue up to the cap, after which they hit 503.
+
+### Restore drill (2026-11-27, #23)
+
+DigitalOcean keeps daily backups of `lcs-queue` (23:00 UTC) plus point-in-time recovery, so a restore can target any moment, not only the last nightly backup. What was done, and how to do it again:
+
+1. **Seed.** Two labelled test submissions (`RESTORE DRILL 1`, `RESTORE DRILL 2`, ids 1 and 2) were queued in production as `lcs_api` through the queue store, and #1 was rejected with `npm run review -- --postgres reject` as `lcs_review`. Production keeps these rows: the queue is append-only by design. #1 is rejected and #2 stays pending; reject #2 with reason `Restore drill #23 test data` before opening submissions, or leave it as a known test row.
+2. **Restore into a new cluster, never over production:**
+   `doctl databases fork lcs-queue-restore-drill --restore-from-cluster-id <lcs-queue id> --restore-from-timestamp "<YYYY-MM-DD HH:MM:SS +0000 UTC>"`
+   Leave out the timestamp to use the latest nightly backup. The fork took **8 minutes** to come online. It keeps the source's firewall rules (the app and the operator IP), its CA certificate, its database `localcoffeeshop`, and every role and password, so the existing `lcs_api`, `lcs_migrator` and `lcs_review` logins work unchanged against the new host.
+3. **Check** with the three logins pointed at the fork's host:
+   - `npm run migrate:pg -- status` → `001_submission_queue.sql applied` (the checksum is verified).
+   - `npm run review -- --postgres list --status all` → both rows with the right status. `show 1` → the reject audit (reviewer, reason, `payloadSha256` matching the row).
+   - A local API with `DATABASE_URL` (lcs_api) **and** `MIGRATION_DATABASE_URL` (lcs_migrator), and `DB_PATH` set to a **copy** of the SQLite file (startup runs SQLite migrations): `/api/v1/health` → `queue: "ok"`.
+4. **Delete** the fork: `doctl databases delete <fork id>`.
+
+From the restore request to a verified, healthy copy took about **9 minutes**.
+
+**Gaps found:**
+- Without `MIGRATION_DATABASE_URL` the API's startup migration runs as `lcs_api`, fails with `permission denied for schema public`, and health reports `queue: "error"`. That is the intended privilege split, not a restore fault, but any server pointed at a restored copy (including a production cut-over) needs **both** URLs.
+- To fail production over to a restore, update `DATABASE_URL` and `MIGRATION_DATABASE_URL` in the app spec to the fork's host. The fork does not replace `lcs-queue` automatically, and the firewall must still trust the app.
+- `submission_reviews.decided_at` is in epoch **seconds** while `shop_submissions.created_at` is in **milliseconds**. That doesn't matter for a restore, but anyone reading the raw rows should know.
+
+### Proxy hops (verified 2026-11-27, #22)
+
+Requests to `api.localcoffeeshop.co` and to the default `*.ondigitalocean.app` domain were read from the production request log:
+
+| Sent by the client | `X-Forwarded-For` the app received | `DO-Connecting-IP` |
+|---|---|---|
+| nothing | `<client>,<Cloudflare edge>` | `<client>` |
+| `X-Forwarded-For: 1.2.3.4` | `1.2.3.4,<client>,<Cloudflare edge>` | `<client>` |
+| `X-Forwarded-For: 1.2.3.4` and `DO-Connecting-IP: 5.6.7.8` | `1.2.3.4,<client>,<Cloudflare edge>` | `<client>` (overwritten) |
+| `X-Forwarded-For: 1.2.3.4, 9.9.9.9` (default domain) | `1.2.3.4, 9.9.9.9,<client>,<Cloudflare edge>` | `<client>` |
+
+The socket peer is DO's ingress (`10.244.x.x`), which appends nothing. The Cloudflare edge address varies between requests (`104.22.x.x`, `172.70.x.x`). The old `trust proxy = 1` therefore made `req.ip` the Cloudflare edge, so unrelated visitors shared budgets and one visitor could get a fresh budget from a different edge. With 2 hops `req.ip` is the client, and anything the client puts in `X-Forwarded-For` stays to its left and is ignored. `TRUST_PROXY_HOPS` (1–5) exists only so a future change in front of the app can be matched without a code change; re-run the check above if the CDN or the domain setup changes.
 - **B-01 (fixed 2026-11-22):** a key reused more than 24h after its first use used to get 409 `IDEMPOTENCY_IN_PROGRESS` until a probabilistic sweep removed the expired row. Reservation is now one upsert that replaces an expired row atomically, tested against real SQLite and Postgres.
 - **Deferred baseline items B-02 (pre-existing, not fixed here):** (a) the non-API 404 handler returns 500 because `src/public/html/404.html` is missing. (b) Fixed 2026-11-22: a storage error in the idempotency lookup or reservation now refuses the write with 503 `IDEMPOTENCY_UNAVAILABLE` instead of running it unprotected. (c) The `Dockerfile` doesn't set `DB_PATH`, so container runs without the app-spec env default to `./coffee_shops.db`. (d) Jest `collectCoverageFrom` covers only `src/server.js` and `src/db.js`.
 - Frontend: companion PR #49 (separate) changes the two success messages to "pending review". The frontend's update tab has never loaded shop ids (`allCoffeeShops` is never filled), so PUT proposals from the UI may not be reachable today.

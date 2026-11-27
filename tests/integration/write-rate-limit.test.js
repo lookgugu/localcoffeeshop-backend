@@ -183,7 +183,7 @@ describe('Write rate limit', () => {
         expect((await request(baseURL).post('/api/v1/coffee-shops').send(payload())).status).toBe(202);
     });
 
-    describe('production (trust proxy = 1 hop)', () => {
+    describe('production (trust proxy = 2 hops: Cloudflare, then DO ingress)', () => {
         beforeEach(async () => {
             // Production defaults submissions OFF; these tests opt in explicitly.
             // DATABASE_URL only satisfies the config gate: no Postgres store is
@@ -196,6 +196,9 @@ describe('Write rate limit', () => {
             });
         });
 
+        // What production actually receives: "<anything the client sent>,
+        // <client as Cloudflare saw it>,<Cloudflare edge>". DO ingress is the
+        // socket peer and appends nothing to XFF.
         function prodPost(xff) {
             return request(baseURL)
                 .post('/api/v1/coffee-shops')
@@ -204,22 +207,28 @@ describe('Write rate limit', () => {
                 .send(payload());
         }
 
-        it('keys on the address appended by the trusted proxy, not a client-forged prefix', async () => {
+        it('keys on the client Cloudflare saw, not a client-forged prefix', async () => {
             const statuses = [];
             for (let i = 1; i <= WRITE_MAX + 2; i++) {
-                // A client forges the left-most entry; the platform proxy appends the real peer.
-                const res = await prodPost(`10.0.0.${i}, 198.51.100.7`);
+                const res = await prodPost(`10.0.0.${i},198.51.100.7,104.22.105.19`);
                 statuses.push(res.status);
             }
             expect(statuses).toEqual([202, 202, 202, 429, 429]);
         });
 
-        it('distinct real clients (as seen by the proxy) get independent budgets', async () => {
+        it('one client arriving through different Cloudflare edges shares one budget', async () => {
+            const edges = ['104.22.105.19', '172.70.175.76', '172.70.34.21', '104.22.105.18'];
+            const statuses = [];
+            for (const edge of edges) statuses.push((await prodPost(`198.51.100.7,${edge}`)).status);
+            expect(statuses).toEqual([202, 202, 202, 429]);
+        });
+
+        it('distinct clients behind the same Cloudflare edge get independent budgets', async () => {
             for (let i = 0; i < WRITE_MAX; i++) {
-                expect((await prodPost('198.51.100.7')).status).toBe(202);
+                expect((await prodPost('198.51.100.7,104.22.105.19')).status).toBe(202);
             }
-            expect((await prodPost('198.51.100.7')).status).toBe(429);
-            expect((await prodPost('198.51.100.8')).status).toBe(202);
+            expect((await prodPost('198.51.100.7,104.22.105.19')).status).toBe(429);
+            expect((await prodPost('198.51.100.8,104.22.105.19')).status).toBe(202);
         });
     });
 });
